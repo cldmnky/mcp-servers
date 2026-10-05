@@ -8,6 +8,7 @@ import (
 
 	jira "github.com/andygrunwald/go-jira/v2/cloud"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/trivago/tgo/tcontainer"
 
 	"github.com/cldmnky/mcp-servers/internal/logging"
 )
@@ -31,11 +32,14 @@ type SearchIssuesParams struct {
 
 // JIRA Issue response
 type JiraIssue struct {
-	Key      string `json:"key"`
-	Summary  string `json:"summary"`
-	Status   string `json:"status"`
-	Priority string `json:"priority"`
-	ViewURI  string `json:"view_uri"`
+	Key            string   `json:"key"`
+	Summary        string   `json:"summary"`
+	Status         string   `json:"status"`
+	Priority       string   `json:"priority"`
+	ViewURI        string   `json:"view_uri"`
+	TargetRelease  string   `json:"target_release,omitempty"`
+	TargetVersions []string `json:"target_versions"`
+	FixVersions    []string `json:"fix_versions"`
 }
 
 // Search Issues result wrapper
@@ -88,6 +92,195 @@ func buildJQLQuery(query string) string {
 	return jql
 }
 
+// Known field IDs in Red Hat Jira used for target release / version
+var knownTargetFieldIDs = []string{
+	"customfield_10855", // Target Version (OpenShift, array of version objects)
+	"customfield_10886", // Target Release (WildFly/middleware, version object)
+	"customfield_10878", // Target Backport Versions (RHEL, array of version objects)
+	"customfield_10495", // BZ Target Release (Bugzilla migrated, option object)
+	"customfield_10813", // ZStream Target Release (option object)
+	"customfield_10820", // Target Upstream Version (string)
+	"target_version",
+	"target_versions",
+	"target_release",
+	"targetVersion",
+	"targetRelease",
+}
+
+func isTargetVersionFieldName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "target version", "target versions",
+		"target release", "target releases",
+		"target backport versions",
+		"bz target release", "zstream target release",
+		"target upstream version":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractVersionsFromValue(val interface{}) []string {
+	if val == nil {
+		return nil
+	}
+
+	var results []string
+
+	switch v := val.(type) {
+	case string:
+		if s := strings.TrimSpace(v); s != "" {
+			results = append(results, s)
+		}
+	case []interface{}:
+		for _, item := range v {
+			results = append(results, extractVersionsFromValue(item)...)
+		}
+	case []string:
+		for _, s := range v {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				results = append(results, trimmed)
+			}
+		}
+	case map[string]interface{}:
+		if name, ok := v["name"].(string); ok && strings.TrimSpace(name) != "" {
+			results = append(results, strings.TrimSpace(name))
+		} else if value, ok := v["value"].(string); ok && strings.TrimSpace(value) != "" {
+			results = append(results, strings.TrimSpace(value))
+		}
+	case tcontainer.MarshalMap:
+		if name, err := v.String("name"); err == nil && strings.TrimSpace(name) != "" {
+			results = append(results, strings.TrimSpace(name))
+		} else if value, err := v.String("value"); err == nil && strings.TrimSpace(value) != "" {
+			results = append(results, strings.TrimSpace(value))
+		}
+	}
+
+	return results
+}
+
+func extractTargetVersions(issue *jira.Issue) []string {
+	if issue == nil || issue.Fields == nil {
+		return make([]string, 0)
+	}
+
+	var raw []string
+	seen := make(map[string]bool)
+
+	addVersions := func(versions []string) {
+		for _, v := range versions {
+			v = strings.TrimSpace(v)
+			if v != "" && !seen[v] {
+				seen[v] = true
+				raw = append(raw, v)
+			}
+		}
+	}
+
+	// 1. Check issue.Names if available (expanded)
+	if len(issue.Names) > 0 && len(issue.Fields.Unknowns) > 0 {
+		for fieldID, fieldName := range issue.Names {
+			if isTargetVersionFieldName(fieldName) {
+				if val, exists := issue.Fields.Unknowns.Value(fieldID); exists {
+					addVersions(extractVersionsFromValue(val))
+				}
+			}
+		}
+	}
+
+	// 2. Check known field IDs in Unknowns
+	if len(issue.Fields.Unknowns) > 0 {
+		for _, fieldID := range knownTargetFieldIDs {
+			if val, exists := issue.Fields.Unknowns.Value(fieldID); exists {
+				addVersions(extractVersionsFromValue(val))
+			}
+		}
+	}
+
+	if raw == nil {
+		return make([]string, 0)
+	}
+	return raw
+}
+
+func extractFixVersions(issue *jira.Issue) []string {
+	if issue == nil || issue.Fields == nil {
+		return make([]string, 0)
+	}
+
+	var raw []string
+	seen := make(map[string]bool)
+
+	addVersion := func(v string) {
+		v = strings.TrimSpace(v)
+		if v != "" && !seen[v] {
+			seen[v] = true
+			raw = append(raw, v)
+		}
+	}
+
+	// Standard go-jira FixVersions field
+	for _, fv := range issue.Fields.FixVersions {
+		if fv != nil {
+			addVersion(fv.Name)
+		}
+	}
+
+	// Fallback to Unknowns in case it was unmarshalled there
+	if len(raw) == 0 && len(issue.Fields.Unknowns) > 0 {
+		for _, key := range []string{"fixVersions", "fix_versions", "fixVersion"} {
+			if val, exists := issue.Fields.Unknowns.Value(key); exists {
+				for _, v := range extractVersionsFromValue(val) {
+					addVersion(v)
+				}
+			}
+		}
+	}
+
+	if raw == nil {
+		return make([]string, 0)
+	}
+	return raw
+}
+
+func extractAffectsVersions(issue *jira.Issue) []string {
+	if issue == nil || issue.Fields == nil {
+		return make([]string, 0)
+	}
+
+	var raw []string
+	seen := make(map[string]bool)
+
+	addVersion := func(v string) {
+		v = strings.TrimSpace(v)
+		if v != "" && !seen[v] {
+			seen[v] = true
+			raw = append(raw, v)
+		}
+	}
+
+	for _, av := range issue.Fields.AffectsVersions {
+		if av != nil {
+			addVersion(av.Name)
+		}
+	}
+
+	if len(raw) == 0 && len(issue.Fields.Unknowns) > 0 {
+		for _, key := range []string{"versions", "affects_versions", "affectsVersions"} {
+			if val, exists := issue.Fields.Unknowns.Value(key); exists {
+				for _, v := range extractVersionsFromValue(val) {
+					addVersion(v)
+				}
+			}
+		}
+	}
+
+	if raw == nil {
+		return make([]string, 0)
+	}
+	return raw
+}
+
 // Search JIRA Issues
 func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIssuesParams) (*mcp.CallToolResult, *SearchIssuesResult, error) {
 	if params.MaxResults < 0 {
@@ -114,7 +307,11 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 	searchOpts := &jira.SearchOptionsV2{
 		MaxResults:    params.MaxResults,
 		NextPageToken: params.NextPageToken,
-		Fields:        []string{"key", "summary", "status", "priority"},
+		Fields: []string{
+			"key", "summary", "status", "priority", "fixVersions",
+			"customfield_10855", "customfield_10886", "customfield_10878",
+			"customfield_10495", "customfield_10813",
+		},
 	}
 
 	// Make API request using go-jira library
@@ -128,8 +325,14 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 	jiraIssues := make([]JiraIssue, 0, len(issues))
 	for _, issue := range issues {
 		jiraIssue := JiraIssue{
-			Key:     issue.Key,
-			ViewURI: fmt.Sprintf("%s/browse/%s", jiraBaseURL, issue.Key),
+			Key:            issue.Key,
+			ViewURI:        fmt.Sprintf("%s/browse/%s", jiraBaseURL, issue.Key),
+			FixVersions:    extractFixVersions(&issue),
+			TargetVersions: extractTargetVersions(&issue),
+		}
+
+		if len(jiraIssue.TargetVersions) > 0 {
+			jiraIssue.TargetRelease = strings.Join(jiraIssue.TargetVersions, ", ")
 		}
 
 		if issue.Fields != nil {
@@ -164,8 +367,15 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 	} else {
 		responseText = fmt.Sprintf("Found %d JIRA issues on this page for query: %s\n\n", len(jiraIssues), params.Query)
 		for i, issue := range jiraIssues {
-			responseText += fmt.Sprintf("%d. **%s** - %s\n   Status: %s | Priority: %s\n   Link: %s\n\n",
-				i+1, issue.Key, issue.Summary, issue.Status, issue.Priority, issue.ViewURI)
+			detailsLine := fmt.Sprintf("   Status: %s | Priority: %s", issue.Status, issue.Priority)
+			if len(issue.TargetVersions) > 0 {
+				detailsLine += fmt.Sprintf(" | Target: %s", strings.Join(issue.TargetVersions, ", "))
+			}
+			if len(issue.FixVersions) > 0 {
+				detailsLine += fmt.Sprintf(" | Fix: %s", strings.Join(issue.FixVersions, ", "))
+			}
+			responseText += fmt.Sprintf("%d. **%s** - %s\n%s\n   Link: %s\n\n",
+				i+1, issue.Key, issue.Summary, detailsLine, issue.ViewURI)
 		}
 	}
 
@@ -185,14 +395,19 @@ type GetIssueParams struct {
 
 // JIRA Issue details
 type JiraIssueDetails struct {
-	Key         string `json:"key"`
-	Summary     string `json:"summary"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	Priority    string `json:"priority"`
-	Created     string `json:"created"`
-	Updated     string `json:"updated"`
-	ViewURI     string `json:"view_uri"`
+	Key             string   `json:"key"`
+	Summary         string   `json:"summary"`
+	Description     string   `json:"description"`
+	Status          string   `json:"status"`
+	Priority        string   `json:"priority"`
+	Created         string   `json:"created"`
+	Updated         string   `json:"updated"`
+	ViewURI         string   `json:"view_uri"`
+	TargetRelease   string   `json:"target_release,omitempty"`
+	TargetVersions  []string `json:"target_versions"`
+	FixVersions     []string `json:"fix_versions"`
+	FixVersion      string   `json:"fix_version,omitempty"`
+	AffectsVersions []string `json:"affects_versions,omitempty"`
 }
 
 // Get JIRA Issue by key
@@ -209,8 +424,22 @@ func getIssue(ctx context.Context, req *mcp.CallToolRequest, params GetIssuePara
 
 	// Parse response
 	details := &JiraIssueDetails{
-		Key:     issue.Key,
-		ViewURI: fmt.Sprintf("%s/browse/%s", jiraBaseURL, params.IssueKey),
+		Key:            issue.Key,
+		ViewURI:        fmt.Sprintf("%s/browse/%s", jiraBaseURL, params.IssueKey),
+		FixVersions:    extractFixVersions(issue),
+		TargetVersions: extractTargetVersions(issue),
+	}
+
+	if len(details.TargetVersions) > 0 {
+		details.TargetRelease = strings.Join(details.TargetVersions, ", ")
+	}
+	if len(details.FixVersions) > 0 {
+		details.FixVersion = strings.Join(details.FixVersions, ", ")
+	}
+
+	affects := extractAffectsVersions(issue)
+	if len(affects) > 0 {
+		details.AffectsVersions = affects
 	}
 
 	if issue.Fields != nil {
@@ -232,7 +461,17 @@ func getIssue(ctx context.Context, req *mcp.CallToolRequest, params GetIssuePara
 
 	// Build detailed response with link
 	responseText := fmt.Sprintf("**%s: %s**\n\nLink: %s\n\n", details.Key, details.Summary, details.ViewURI)
-	responseText += fmt.Sprintf("**Status:** %s\n**Priority:** %s\n\n", details.Status, details.Priority)
+	responseText += fmt.Sprintf("**Status:** %s\n**Priority:** %s\n", details.Status, details.Priority)
+	if len(details.TargetVersions) > 0 {
+		responseText += fmt.Sprintf("**Target Version(s):** %s\n", strings.Join(details.TargetVersions, ", "))
+	}
+	if len(details.FixVersions) > 0 {
+		responseText += fmt.Sprintf("**Fix Version(s):** %s\n", strings.Join(details.FixVersions, ", "))
+	}
+	if len(details.AffectsVersions) > 0 {
+		responseText += fmt.Sprintf("**Affects Version(s):** %s\n", strings.Join(details.AffectsVersions, ", "))
+	}
+	responseText += "\n"
 	if details.Created != "" {
 		responseText += fmt.Sprintf("**Created:** %s\n", details.Created)
 	}
@@ -271,7 +510,7 @@ func NewRedHatIssuesServer() (*mcp.Server, error) {
 		Description: "Search Red Hat Jira Cloud issues (https://redhat.atlassian.net), covering engineering bugs, features, and escalations in projects such as OCPBUGS, OCPENG, and OCPTRL.\n\n" +
 			"Input handling: if the query contains JQL operators (project =, status IN, ~, AND, OR), it is sent as-is; anything else is wrapped in a `text ~ \"...\"` full-text search across summary, description, comments, and environment. Prefer explicit JQL to filter precisely; use plain text only for broad topical searches.\n\n" +
 			"Examples: `project = OCPBUGS AND text ~ \"GPU passthrough\"` (JQL) or `ovnkube crashloop after node reboot` (plain text).\n\n" +
-			"Returns one page of issues with key, summary, status, priority, and a browse URL. Pagination is token-based: pass `next_page_token` from the response with the same query to fetch more; `is_last` marks the end. No exact total is available from the API. Typical page sizes fit well under the default of 50.\n\n" +
+			"Returns one page of issues with key, summary, status, priority, target versions, fix versions, and a browse URL. Pagination is token-based: pass `next_page_token` from the response with the same query to fetch more; `is_last` marks the end. No exact total is available from the API. Typical page sizes fit well under the default of 50.\n\n" +
 			"Use get_issue to retrieve the full description of a result. For Red Hat knowledge-base articles, use search_kcs instead.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "Search Red Hat Jira issues",
@@ -287,7 +526,7 @@ func NewRedHatIssuesServer() (*mcp.Server, error) {
 		Name: "get_issue",
 		Description: "Retrieve the full record of one Red Hat Jira Cloud issue by its key, e.g. OCPBUGS-55179 or OCPENG-1234.\n\n" +
 			"Use when the key is already known — from search_issues results, a KCS article cross-reference, or the user. If you only have a topic or symptom, call search_issues first instead of guessing keys.\n\n" +
-			"Returns key, summary, full description text, status, priority, created/updated timestamps, and the https://redhat.atlassian.net/browse/{key} URL.",
+			"Returns key, summary, full description text, status, priority, target release/versions, fix versions, created/updated timestamps, and the https://redhat.atlassian.net/browse/{key} URL.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "Get Red Hat Jira issue details",
 			ReadOnlyHint:    true,

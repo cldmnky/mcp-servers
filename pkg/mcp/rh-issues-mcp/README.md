@@ -38,7 +38,7 @@ Search using JQL or plain text, which is converted to a JQL `text ~` query.
 - `max_results` (optional): page size, default 50.
 - `next_page_token` (optional): continuation token returned by the previous search. Omit for the first page; keep the same query when requesting further pages.
 
-Returns `issues` (key, summary, status, priority, view URI), `count`, `query`, `is_last`, and an optional `next_page_token`.
+Returns `issues` (key, summary, status, priority, target versions, fix versions, view URI), `count`, `query`, `is_last`, and an optional `next_page_token`.
 
 **Migration change:** Jira Cloud's enhanced search uses token-based pagination. `start_at` is no longer supported, and the response no longer contains `total` because the endpoint does not return an exact total. Use `is_last` and `next_page_token` instead.
 
@@ -46,7 +46,7 @@ Returns `issues` (key, summary, status, priority, view URI), `count`, `query`, `
 
 - `issue_key` (required): e.g. `OCPBUGS-55179`.
 
-Returns key, summary, description (converted from Jira wiki markup to Markdown), status, priority, created/updated dates, and a link to `https://redhat.atlassian.net/browse/{key}`.
+Returns key, summary, description (converted from Jira wiki markup to Markdown), status, priority, target release/versions, fix versions, affects versions, created/updated dates, and a link to `https://redhat.atlassian.net/browse/{key}`.
 
 **Markup conversion:** Jira stores descriptions in wiki markup (`h2.` headings, `{noformat}`/`{code}` blocks, `*bold*`, `[title|url]` links, `[~mention]`). The server converts these to Markdown; unknown constructs pass through unchanged, and fenced code is never altered. Markers are sometimes stored backslash-escaped (`\{code}`) — both forms are handled.
 

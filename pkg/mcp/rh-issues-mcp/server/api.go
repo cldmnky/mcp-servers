@@ -62,7 +62,7 @@ func (j *JiraAPI) SearchIssues(ctx context.Context, jql string, opts *jira.Searc
 func (j *JiraAPI) GetIssue(ctx context.Context, issueKey string) (*jira.Issue, error) {
 	logging.Debugf("[api] getting issue: %s", issueKey)
 
-	issue, _, err := j.client.Issue.Get(ctx, issueKey, nil)
+	issue, _, err := j.client.Issue.Get(ctx, issueKey, &jira.GetQueryOptions{Expand: "names"})
 	if err != nil {
 		logging.Errorf("[api] failed to get issue %s: %v", issueKey, err)
 		return nil, fmt.Errorf("failed to get JIRA issue: %w", err)

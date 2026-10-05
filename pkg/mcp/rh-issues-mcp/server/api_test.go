@@ -32,12 +32,12 @@ func TestCloudAPI(t *testing.T) {
 		switch r.URL.Path {
 		case "/rest/api/2/search/jql":
 			q := r.URL.Query()
-			if q.Get("jql") != "project = OCPBUGS" || q.Get("nextPageToken") != "page-2" || q.Get("maxResults") != "10" {
+			if q.Get("jql") != "project = PROJ" || q.Get("nextPageToken") != "page-2" || q.Get("maxResults") != "10" {
 				t.Errorf("unexpected query: %v", q)
 			}
-			w.Write([]byte(`{"issues":[{"key":"OCPBUGS-1"}],"isLast":false,"nextPageToken":"page-3"}`))
-		case "/rest/api/2/issue/OCPBUGS-1":
-			w.Write([]byte(`{"key":"OCPBUGS-1","fields":{"description":"Issue description"}}`))
+			w.Write([]byte(`{"issues":[{"key":"PROJ-1"}],"isLast":false,"nextPageToken":"page-3"}`))
+		case "/rest/api/2/issue/PROJ-1":
+			w.Write([]byte(`{"key":"PROJ-1","fields":{"description":"Issue description"}}`))
 		default:
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -50,14 +50,14 @@ func TestCloudAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &JiraAPI{client: client}
-	issues, resp, err := api.SearchIssues(context.Background(), "project = OCPBUGS", &jira.SearchOptionsV2{MaxResults: 10, NextPageToken: "page-2"})
+	issues, resp, err := api.SearchIssues(context.Background(), "project = PROJ", &jira.SearchOptionsV2{MaxResults: 10, NextPageToken: "page-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(issues) != 1 || resp.IsLast || resp.NextPageToken != "page-3" {
 		t.Fatalf("unexpected search response: %+v %+v", issues, resp)
 	}
-	issue, err := api.GetIssue(context.Background(), "OCPBUGS-1")
+	issue, err := api.GetIssue(context.Background(), "PROJ-1")
 	if err != nil {
 		t.Fatal(err)
 	}

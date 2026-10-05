@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "rhkcs": {
+        "type": "local",
+        "command": ["./bin/rhkcs-mcp"],
+        "environment": {
+          "RH_API_OFFLINE_TOKEN": "{env:RH_API_OFFLINE_TOKEN}"
+        }
+      },
+      "rh-issues": {
+        "type": "local",
+        "command": ["./bin/rh-issues-mcp"],
+        "environment": {
+          "RH_JIRA_EMAIL": "{env:RH_JIRA_EMAIL}",
+          "RH_JIRA_TOKEN": "{env:RH_JIRA_TOKEN}"
+        }
+      }
+    }
+  }
+}
