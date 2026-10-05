@@ -288,14 +288,55 @@ func TestGetKCSExtractsFields(t *testing.T) {
 }
 
 func TestGetKCSArticleUsesAbstract(t *testing.T) {
-	// Articles (documentKind=Article) carry an abstract instead of
-	// solution_resolution/issue; drafts may have no body at all.
+	// Published Article: 'abstract' is duplicated upstream
+	// (publishedAbstract x2 + title); the clean publishedAbstract copy wins.
+	ts := kcsSearchHandler(t, `{"response":{"docs":[{
+		"id":"6955985",
+		"documentKind":"Article",
+		"publishedTitle":"Navigating Kubernetes API deprecations and removals",
+		"standard_product":"Red Hat OpenShift Container Platform",
+		"publishedAbstract":"Kubernetes follows a fairly strict API versioning policy. Deprecated APIs are removed after a few releases.",
+		"abstract":"Kubernetes follows a fairly strict API versioning policy. Deprecated APIs are removed after a few releases. Kubernetes follows a fairly strict API versioning policy. Deprecated APIs are removed after a few releases. Navigating Kubernetes API deprecations and removals",
+		"view_uri":"https://access.redhat.com/articles/6955985"
+	}]}}`)
+	defer ts.Close()
+
+	api, _ := newTestAPI(t, ts.URL)
+	swapGlobalAPI(t, api)
+
+	toolResult, details, err := getKCS(context.Background(), nil, GetKCSParams{SolutionID: "6955985"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.Kind != "Article" || details.Title == "" {
+		t.Fatalf("article details incomplete: %+v", details)
+	}
+	want := "Kubernetes follows a fairly strict API versioning policy. Deprecated APIs are removed after a few releases."
+	if details.Abstract != want {
+		t.Errorf("abstract = %q, want clean publishedAbstract %q", details.Abstract, want)
+	}
+	text := resultText(t, toolResult)
+	if !strings.Contains(text, "**Abstract:**") {
+		t.Errorf("text output missing abstract section: %s", text)
+	}
+	if !strings.Contains(text, "Article abstract only") {
+		t.Errorf("missing article-body pointer: %s", text)
+	}
+	if strings.Contains(details.Abstract, details.Title) {
+		t.Errorf("abstract still contains appended title: %q", details.Abstract)
+	}
+}
+
+func TestGetKCSDraftArticleDedupesAbstract(t *testing.T) {
+	// Draft Article: publishedAbstract is empty and 'abstract' carries the
+	// duplicated form (sentence x2 + title), as in real doc 1240753.
 	ts := kcsSearchHandler(t, `{"response":{"docs":[{
 		"id":"1240753",
 		"documentKind":"Article",
 		"publishedTitle":"Allocate Floating IP Addresses in OpenStack Networking",
 		"standard_product":"Red Hat OpenStack Platform",
-		"abstract":"Floating IP addresses allow you to direct ingress network traffic to your OpenStack instances.",
+		"publishedAbstract":"",
+		"abstract":"Floating IP addresses allow you to direct ingress network traffic to your OpenStack instances. Floating IP addresses allow you to direct ingress network traffic to your OpenStack instances. Allocate Floating IP Addresses in OpenStack Networking",
 		"view_uri":"https://access.redhat.com/articles/1240753"
 	}]}}`)
 	defer ts.Close()
@@ -303,18 +344,65 @@ func TestGetKCSArticleUsesAbstract(t *testing.T) {
 	api, _ := newTestAPI(t, ts.URL)
 	swapGlobalAPI(t, api)
 
-	toolResult, details, err := getKCS(context.Background(), nil, GetKCSParams{SolutionID: "1240753"})
+	_, details, err := getKCS(context.Background(), nil, GetKCSParams{SolutionID: "1240753"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if details.Kind != "Article" || details.Abstract == "" || details.Title == "" {
-		t.Fatalf("article details incomplete: %+v", details)
+	want := "Floating IP addresses allow you to direct ingress network traffic to your OpenStack instances."
+	if details.Abstract != want {
+		t.Errorf("deduped abstract = %q, want %q", details.Abstract, want)
 	}
-	if !strings.Contains(resultText(t, toolResult), "**Abstract:**") {
-		t.Errorf("text output missing abstract section: %s", resultText(t, toolResult))
+}
+
+func TestGetKCSSolutionSkipsAbstract(t *testing.T) {
+	// Solutions get an auto-generated abstract that duplicates the issue
+	// text; it must not be surfaced, as in real doc 7143968.
+	ts := kcsSearchHandler(t, `{"response":{"docs":[{
+		"id":"7143968",
+		"documentKind":"Solution",
+		"publishedTitle":"Some ovn-master containers are crashlooping",
+		"issue":["- OpenShift clusters running a high number of Primary UDNs experience intermittent egress connectivity failures."],
+		"abstract":"- OpenShift clusters running a high number of Primary UDNs experience intermittent egress connectivity failures.",
+		"solution_resolution":"Restart the pods."
+	}]}}`)
+	defer ts.Close()
+
+	api, _ := newTestAPI(t, ts.URL)
+	swapGlobalAPI(t, api)
+
+	toolResult, details, err := getKCS(context.Background(), nil, GetKCSParams{SolutionID: "7143968"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(resultText(t, toolResult), "No body content") {
-		t.Errorf("abstract present, empty-body note must not appear")
+	if details.Abstract != "" {
+		t.Errorf("Solution abstract should be omitted, got %q", details.Abstract)
+	}
+	if strings.Contains(resultText(t, toolResult), "**Abstract:**") {
+		t.Errorf("Solution output must not render an abstract section")
+	}
+}
+
+func TestDedupeAbstract(t *testing.T) {
+	tests := []struct {
+		name, in, title, want string
+	}{
+		{
+			"real draft duplication",
+			"Floating IP addresses allow you to direct ingress network traffic to your OpenStack instances. Floating IP addresses allow you to direct ingress network traffic to your OpenStack instances. Allocate Floating IP Addresses in OpenStack Networking",
+			"Allocate Floating IP Addresses in OpenStack Networking",
+			"Floating IP addresses allow you to direct ingress network traffic to your OpenStack instances.",
+		},
+		{"non-duplicated text untouched", "One sentence. Another sentence.", "T", "One sentence. Another sentence."},
+		{"interleaved repeats kept", "A. B. A. B.", "T", "A. B. A. B."},
+		{"empty", "", "T", ""},
+		{"title case-insensitive", "Body text. body title", "Body Title", "Body text."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dedupeAbstract(tt.in, tt.title); got != tt.want {
+				t.Errorf("dedupeAbstract = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -357,7 +445,7 @@ func TestGetKCSWarnsAboutFencedCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := resultText(t, toolResult)
-	if !strings.Contains(text, "Treat fenced commands as reference") {
+	if !strings.Contains(text, "NOT executable as returned") {
 		t.Errorf("missing mangled-command warning: %s", text)
 	}
 }

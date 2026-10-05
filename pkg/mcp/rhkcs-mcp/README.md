@@ -29,10 +29,11 @@ Get a specific solution by ID and extract structured content with title, Environ
 - `session_id` (string, optional): Deprecated; accepted for backwards compatibility and ignored.
 
 **Returns:**
-- Detailed solution with title, kind, environment, abstract (Articles), issue, resolution, and root cause. Articles carry an `abstract` instead of solution fields; documents with no body in the index (drafts, restricted) say so explicitly in the response.
+- Solutions: title, kind, environment, issue, resolution, and root cause.
+- Articles: title, kind, environment, and abstract only — the full article body is not in the search index; use the `view_uri` link for the complete page. The response notes this. The index's raw `abstract` field is stored duplicated (publishedAbstract repeated, title appended); the server returns the clean `publishedAbstract` copy, or a deduplicated fallback for drafts, and never shows the auto-generated abstract on Solutions (it duplicates their issue text).
 
 **Formatting:**
-The search index flattens line breaks out of stored text, so articles arrive as single lines. The server re-inserts line breaks around Markdown block elements (headings, list items, numbered steps) to restore readable structure. Code fences are kept byte-for-byte verbatim — the index also eats spaces where line breaks used to be, so fenced commands can be mangled — and the response includes a warning not to execute fenced commands as-is. Inline constructs such as links, `--flags`, and version numbers are left untouched.
+The search index flattens line breaks out of stored text, so articles arrive as single lines. The server re-inserts line breaks around Markdown block elements (headings, list items, numbered steps) to restore readable structure. Code fences are kept byte-for-byte verbatim — the index also eats spaces where line breaks used to be, so fenced commands come back mangled (`oc get nodes-o` for `oc get nodes -o`) — and the response includes a warning that they are not executable as returned. Inline constructs such as links, `--flags`, and version numbers are left untouched.
 
 ## Setup
 

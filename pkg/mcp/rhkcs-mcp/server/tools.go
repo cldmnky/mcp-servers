@@ -225,11 +225,13 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 
 	// Use the KCS search API with an ID query to get the full solution.
 	// Solutions carry issue/resolution/root-cause fields; Articles carry an
-	// abstract instead, so request both shapes.
+	// abstract instead. The raw 'abstract' field is built upstream as
+	// publishedAbstract + publishedAbstract + title, so prefer the clean
+	// publishedAbstract copy and deduplicate the fallback.
 	requestData := map[string]interface{}{
 		"clientName": "mcp",
 		"q":          fmt.Sprintf("id:%s", params.SolutionID),
-		"expression": "fl=publishedTitle,allTitle,standard_product,issue,solution_resolution,solution_rootcause,view_uri,id,documentKind,abstract",
+		"expression": "fl=publishedTitle,allTitle,standard_product,issue,solution_resolution,solution_rootcause,view_uri,id,documentKind,abstract,publishedAbstract",
 	}
 
 	logging.Debugf("[get_kcs] solution ID: %s", params.SolutionID)
@@ -257,7 +259,16 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 					details.Kind = kind
 				}
 				details.Environment = firstString(doc["standard_product"])
-				details.Abstract = firstString(doc["abstract"])
+				// Articles carry only an abstract; Solutions get an
+				// auto-generated abstract that duplicates their issue text,
+				// so it is not shown for them.
+				if details.Kind == "Article" {
+					abs := firstString(doc["publishedAbstract"])
+					if abs == "" {
+						abs = dedupeAbstract(firstString(doc["abstract"]), details.Title)
+					}
+					details.Abstract = abs
+				}
 				details.Issue = reflowMarkdown(firstString(doc["issue"]))
 				details.Resolution = reflowMarkdown(firstString(doc["solution_resolution"]))
 				details.RootCause = reflowMarkdown(firstString(doc["solution_rootcause"]))
@@ -279,6 +290,9 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 	}
 	if details.Abstract != "" {
 		responseText += fmt.Sprintf("**Abstract:**\n%s\n\n", details.Abstract)
+		if details.Kind == "Article" {
+			responseText += "_Article abstract only — the search index has no full article body; see the link above for the complete page._\n\n"
+		}
 	}
 	if details.Issue != "" {
 		responseText += fmt.Sprintf("**Issue:**\n%s\n\n", details.Issue)
@@ -296,11 +310,12 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 		responseText += "\n_No body content is available in the search index for this document (it may be a draft, restricted, or subscriber-only); consult the link above._\n"
 	}
 
-	// The index strips line breaks — and sometimes the spaces around them —
-	// inside code fences, so fenced commands may be mangled. Warn against
-	// executing them verbatim.
+	// The index strips line breaks — and the spaces around them — inside
+	// code fences, so commands come back mangled ('oc get nodes-o' for
+	// 'oc get nodes -o', 'bash-c' for 'bash -c'). Warn that they are not
+	// executable as returned.
 	if fencedCodePresent(details.Issue) || fencedCodePresent(details.Resolution) || fencedCodePresent(details.RootCause) {
-		responseText += "\n_Note: the source index strips line breaks (and occasionally spaces) inside code blocks. Treat fenced commands as reference and reconstruct them before executing._\n"
+		responseText += "\n_Warning: the source index strips line breaks and sometimes the spaces around them, so fenced commands are NOT executable as returned (e.g. 'nodes-o' for 'nodes -o'). Use them as reference and reconstruct with correct spacing before running._\n"
 	}
 
 	return &mcp.CallToolResult{
@@ -389,6 +404,62 @@ func fencedCodePresent(s string) bool {
 	return fenceSplit.MatchString(s)
 }
 
+// dedupeAbstract cleans the duplicated abstract the index stores for
+// unpublished documents: the 'abstract' field is assembled upstream as
+// publishedAbstract + publishedAbstract + title. Collapse consecutive
+// duplicate sentences and drop a trailing sentence that restates the title.
+func dedupeAbstract(s, title string) string {
+	if s == "" {
+		return s
+	}
+	parts := splitSentences(s)
+	var kept []string
+	for _, p := range parts {
+		if len(kept) > 0 && kept[len(kept)-1] == p {
+			continue // consecutive duplicate sentence
+		}
+		kept = append(kept, p)
+	}
+	if len(kept) > 0 && title != "" && sameSentence(kept[len(kept)-1], title) {
+		kept = kept[:len(kept)-1]
+	}
+	return strings.Join(kept, " ")
+}
+
+// splitSentences splits text into sentences, keeping terminal punctuation.
+func splitSentences(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '.', '?', '!':
+			if i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\n') {
+				out = append(out, strings.TrimSpace(s[start:i+1]))
+				start = i + 1
+			}
+		}
+	}
+	if tail := strings.TrimSpace(s[start:]); tail != "" {
+		out = append(out, tail)
+	}
+	return out
+}
+
+// sameSentence compares two sentences ignoring case, surrounding punctuation,
+// and whitespace, so a trailing title restatement can be detected.
+func sameSentence(a, b string) bool {
+	norm := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		s = strings.Trim(s, ".,;:!?")
+		return s
+	}
+	return norm(a) == norm(b) && norm(a) != ""
+}
+
 // NewRedHatKCSServer creates a new MCP server with Red Hat KCS tools
 func NewRedHatKCSServer() (*mcp.Server, error) {
 	// Initialize the global API client
@@ -420,8 +491,9 @@ func NewRedHatKCSServer() (*mcp.Server, error) {
 	// Add get KCS tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_kcs",
-		Description: "Retrieve the full content of one Red Hat KCS solution by its numeric ID (e.g. 7010411), returning title, affected environment, issue description, resolution steps, root cause, and the access.redhat.com URL. Solutions carry issue/resolution/root-cause sections; Articles carry an abstract. Long text fields are re-formatted with restored line breaks for readability, and a warning is included when code blocks may have lost line breaks in the source index — do not execute fenced commands verbatim.\n\n" +
-			"Use when the solution ID is known — from a search_kcs result, a Jira issue, or the user. `solution_id` must be purely numeric: documentation URLs and other identifiers are rejected; call search_kcs to find numeric Solution or Article IDs.",
+		Description: "Retrieve the content of one Red Hat KCS document by its numeric ID (e.g. 7010411), with title, affected environment, and the access.redhat.com URL.\n\n" +
+			"Solutions return issue, resolution, and root-cause sections. Articles return their abstract only — the full article body is not in the search index, so follow the link for the complete page. Long text is re-formatted with restored line breaks; however, the index also strips spaces inside code fences, so fenced commands are NOT executable as returned and must be reconstructed with correct spacing (the response includes this warning).\n\n" +
+			"Use when the ID is known — from a search_kcs result, a Jira issue, or the user. `solution_id` must be purely numeric: documentation URLs and other identifiers are rejected; call search_kcs to find numeric Solution or Article IDs.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "Get Red Hat KCS solution details",
 			ReadOnlyHint:    true,
