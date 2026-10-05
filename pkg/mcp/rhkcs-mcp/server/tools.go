@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -33,6 +35,7 @@ type SearchKCSParams struct {
 type KCSSolution struct {
 	ID      string  `json:"id"`
 	Title   string  `json:"title"`
+	Kind    string  `json:"kind" jsonschema:"Document kind: Solution or Article"`
 	Score   float64 `json:"score"`
 	ViewURI string  `json:"view_uri"`
 }
@@ -64,13 +67,16 @@ func searchKCS(ctx context.Context, req *mcp.CallToolRequest, params SearchKCSPa
 
 	// Use the Solr Search API per Case Management API documentation.
 	// The 'expression' parameter is REQUIRED and specifies field list (fl),
-	// filters (fq), and sorting.
+	// filters (fq), and sorting. Restrict to Solution/Article documents:
+	// other kinds (Documentation pages, Labs, Vulnerability entries,
+	// container catalog rows) have non-numeric IDs that get_kcs cannot
+	// fetch, and Documentation results also return one row per translation.
 	requestData := map[string]interface{}{
 		"clientName": "mcp",
 		"q":          params.Query,
 		"rows":       params.Rows,
 		"start":      params.Start,
-		"expression": "fl=id,allTitle,publishedTitle,score,view_uri,documentKind,standard_product&sort=score DESC",
+		"expression": "fl=id,allTitle,publishedTitle,score,view_uri,documentKind,standard_product&sort=score DESC&fq=documentKind:(Solution OR Article)",
 	}
 
 	logging.Debugf("[search_kcs] query=%q rows=%d start=%d", params.Query, params.Rows, params.Start)
@@ -122,6 +128,9 @@ func parseKCSSolutions(result map[string]interface{}) []KCSSolution {
 					solution := KCSSolution{}
 					if id, ok := docMap["id"].(string); ok {
 						solution.ID = id
+					}
+					if kind, ok := docMap["documentKind"].(string); ok {
+						solution.Kind = kind
 					}
 					if title, ok := docMap["allTitle"].(string); ok {
 						solution.Title = title
@@ -198,8 +207,16 @@ type KCSDetails struct {
 	ViewURI     string `json:"view_uri"`
 }
 
+// numericID reports whether s is a numeric KCS solution ID (the only kind
+// get_kcs can resolve; documentation URLs and catalog slugs are not valid).
+var numericID = regexp.MustCompile(`^[0-9]+$`)
+
 // Get KCS Solution by ID
 func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) (*mcp.CallToolResult, *KCSDetails, error) {
+	if !numericID.MatchString(params.SolutionID) {
+		return nil, nil, fmt.Errorf("solution_id %q is not a numeric KCS solution ID (e.g. 7010411); documentation URLs and other identifiers cannot be fetched — use search_kcs to find numeric Solution or Article IDs", params.SolutionID)
+	}
+
 	if globalAPI == nil {
 		return nil, nil, fmt.Errorf("Red Hat API client not initialized")
 	}
@@ -225,16 +242,18 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 	if response, ok := result["response"].(map[string]interface{}); ok {
 		if docs, ok := response["docs"].([]interface{}); ok && len(docs) > 0 {
 			if doc, ok := docs[0].(map[string]interface{}); ok {
-				// Some fields come as strings, others as arrays.
+				// Some fields come as strings, others as arrays. Long text
+				// fields arrive flattened to a single line; reflowMarkdown
+				// restores the line structure of their block elements.
 				if title, ok := doc["publishedTitle"].(string); ok {
 					details.Title = title
 				} else if title, ok := doc["allTitle"].(string); ok {
 					details.Title = title
 				}
 				details.Environment = firstString(doc["standard_product"])
-				details.Issue = firstString(doc["issue"])
-				details.Resolution = firstString(doc["solution_resolution"])
-				details.RootCause = firstString(doc["solution_rootcause"])
+				details.Issue = reflowMarkdown(firstString(doc["issue"]))
+				details.Resolution = reflowMarkdown(firstString(doc["solution_resolution"]))
+				details.RootCause = reflowMarkdown(firstString(doc["solution_rootcause"]))
 				if viewURI, ok := doc["view_uri"].(string); ok {
 					details.ViewURI = viewURI
 				}
@@ -286,6 +305,34 @@ func firstString(v interface{}) string {
 	return ""
 }
 
+// reflowMarkdown restores the line structure that the search API flattens
+// out of stored text fields: the Solr index collapses newlines, so headings,
+// list items, and code fences arrive glued into a single line. Breaking
+// before Markdown block markers makes articles readable again without
+// changing their content.
+var (
+	reflowFence   = regexp.MustCompile(`\s*(~{3,}|` + "`{3,}" + `)`)
+	reflowHeading = regexp.MustCompile(`\s*(#{1,6}\s)`)
+	reflowBullet  = regexp.MustCompile(`([^\s])- `)
+	reflowOrdered = regexp.MustCompile(`([^\d\s])\s*(\d{1,2}\. )`)
+	reflowSqueeze = regexp.MustCompile(`\n{3,}`)
+)
+
+func reflowMarkdown(s string) string {
+	s = strings.TrimSpace(s)
+	// Skip text that already contains line breaks so pre-formatted input is
+	// never re-processed.
+	if s == "" || strings.Contains(s, "\n") {
+		return s
+	}
+	s = reflowFence.ReplaceAllString(s, "\n\n$1")
+	s = reflowHeading.ReplaceAllString(s, "\n\n$1")
+	s = reflowBullet.ReplaceAllString(s, "$1\n- ")
+	s = reflowOrdered.ReplaceAllString(s, "$1\n$2")
+	s = reflowSqueeze.ReplaceAllString(s, "\n\n")
+	return strings.TrimSpace(s)
+}
+
 // NewRedHatKCSServer creates a new MCP server with Red Hat KCS tools
 func NewRedHatKCSServer() (*mcp.Server, error) {
 	// Initialize the global API client
@@ -304,7 +351,7 @@ func NewRedHatKCSServer() (*mcp.Server, error) {
 		Name: "search_kcs",
 		Description: "Search the official Red Hat Customer Portal knowledge base (KCS) for solutions and articles, and get their real numeric IDs, titles, relevance scores, and access.redhat.com URLs.\n\n" +
 			"Use for Red Hat product troubleshooting, configuration how-tos, and error lookups (OpenShift, RHEL, Ansible, etc.). Use plain keywords or quoted phrases; simple topical queries work better than long natural-language sentences.\n\n" +
-			"Results are the authoritative solution IDs — do not guess or fabricate IDs; pass them to get_kcs for the full article. For Red Hat Jira engineering issues, use search_issues instead.",
+			"Results include only Solution and Article documents — every numeric `id` can be fetched directly with get_kcs. Product documentation pages, labs, and catalog entries are excluded, along with their translations. Do not guess or fabricate IDs. For Red Hat Jira engineering issues, use search_issues instead.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "Search Red Hat KCS solutions",
 			ReadOnlyHint:    true,
@@ -317,8 +364,8 @@ func NewRedHatKCSServer() (*mcp.Server, error) {
 	// Add get KCS tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_kcs",
-		Description: "Retrieve the full content of one Red Hat KCS solution by its numeric ID (e.g. 7010411), returning title, affected environment, issue description, resolution steps, root cause, and the access.redhat.com URL.\n\n" +
-			"Use when the solution ID is known — from a search_kcs result, a Jira issue, or the user. Without an ID, call search_kcs first; arbitrary numbers will not resolve.",
+		Description: "Retrieve the full content of one Red Hat KCS solution by its numeric ID (e.g. 7010411), returning title, affected environment, issue description, resolution steps, root cause, and the access.redhat.com URL. Long text fields are re-formatted with restored line breaks for readability.\n\n" +
+			"Use when the solution ID is known — from a search_kcs result, a Jira issue, or the user. `solution_id` must be purely numeric: documentation URLs and other identifiers are rejected; call search_kcs to find numeric Solution or Article IDs.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "Get Red Hat KCS solution details",
 			ReadOnlyHint:    true,

@@ -15,18 +15,24 @@ Search for Red Hat KCS Solutions and Articles, returning a list with Solution ID
 - `start` (int, optional): Starting index for pagination (default: 0)
 - `session_id` (string, optional): Deprecated; accepted for backwards compatibility and ignored.
 
+**Filtering:**
+Results are filtered server-side (`fq`) to documents where `documentKind` is "Solution" or "Article". Product documentation pages, labs, vulnerability entries, and container catalog rows are excluded — their identifiers are not numeric solution IDs and cannot be fetched with `get_kcs`; excluding them also removes per-translation duplicates of documentation pages.
+
 **Returns:**
-- List of solutions with ID, title, score, and view URI
+- List of solutions with numeric ID, kind (Solution or Article), title, score, and view URI
 
 ### 2. Get KCS Solution (`get_kcs`)
 Get a specific solution by ID and extract structured content with title, Environment, Issue, Resolution, and Root Cause.
 
 **Parameters:**
-- `solution_id` (string, required): The ID of the solution to retrieve
+- `solution_id` (string, required): Numeric solution ID from a `search_kcs` result, e.g. `7010411`. Documentation URLs and other identifiers are rejected with an error.
 - `session_id` (string, optional): Deprecated; accepted for backwards compatibility and ignored.
 
 **Returns:**
 - Detailed solution with title, environment, issue, resolution, and root cause
+
+**Formatting:**
+The search index flattens line breaks out of stored text, so articles arrive as single lines. The server re-inserts line breaks around Markdown block elements (headings, list items, numbered steps, code fences) to restore readable structure; inline constructs such as links, `--flags`, and version numbers are left untouched.
 
 ## Setup
 

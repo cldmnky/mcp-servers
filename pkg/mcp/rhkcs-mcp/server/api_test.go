@@ -157,8 +157,8 @@ func TestSearchKCSDefaultsAndDocsShape(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"response":{"docs":[
-			{"id":"7010411","allTitle":"Example solution","score":1.5,"view_uri":"https://access.redhat.com/solutions/7010411"},
-			{"id":"7010412","title":"Fallback title shape"},
+			{"id":"7010411","allTitle":"Example solution","documentKind":"Solution","score":1.5,"view_uri":"https://access.redhat.com/solutions/7010411"},
+			{"id":"7010412","title":"Fallback title shape","documentKind":"Article"},
 			{"id":"","allTitle":"dropped: no id"}
 		]}}`)
 	}))
@@ -179,12 +179,14 @@ func TestSearchKCSDefaultsAndDocsShape(t *testing.T) {
 	}
 	if _, ok := sent["expression"].(string); !ok {
 		t.Errorf("missing required expression field: %v", sent)
+	} else if !strings.Contains(sent["expression"].(string), "fq=documentKind:(Solution OR Article)") {
+		t.Errorf("expression must filter to Solution/Article documents: %v", sent["expression"])
 	}
 	if result.Count != 2 {
 		t.Fatalf("parsed %d solutions, want 2: %+v", result.Count, result)
 	}
 	first := result.Solutions[0]
-	if first.ID != "7010411" || first.Title != "Example solution" || first.ViewURI == "" {
+	if first.ID != "7010411" || first.Title != "Example solution" || first.ViewURI == "" || first.Kind != "Solution" {
 		t.Errorf("unexpected first solution: %+v", first)
 	}
 	if result.Solutions[1].Title != "Fallback title shape" {
@@ -227,7 +229,7 @@ func TestGetKCSExtractsFields(t *testing.T) {
 		"publishedTitle":"Configuring the thing",
 		"standard_product":["Red Hat OpenShift Container Platform"],
 		"issue":["The component fails to start."],
-		"solution_resolution":"Increase the limit.",
+		"solution_resolution":"## Solution- OCP 4.6: Upgrade to 4.6.55 or above- OCP 4.7: Upgrade to 4.7.42 or above ## Workaround Follow these steps.1. Disable the operator ~~~ oc patch clusterversion version--type json ~~~- Scale down",
 		"root_cause_listed_but_wrong_key":"ignored"
 	}]}}`)
 	defer ts.Close()
@@ -248,10 +250,59 @@ func TestGetKCSExtractsFields(t *testing.T) {
 	if details.Issue != "The component fails to start." {
 		t.Errorf("issue (array form) = %q", details.Issue)
 	}
-	if details.Resolution != "Increase the limit." {
-		t.Errorf("resolution (string form) = %q", details.Resolution)
+	// Flattened resolution text must regain its block structure.
+	if !strings.HasPrefix(details.Resolution, "## Solution\n- OCP 4.6: Upgrade to 4.6.55 or above\n- OCP 4.7:") {
+		t.Errorf("resolution head not reflowed:\n%q", details.Resolution)
+	}
+	for _, want := range []string{
+		"\n\n## Workaround",
+		"steps.\n1. Disable",
+		"operator\n\n~~~ oc patch",
+	} {
+		if !strings.Contains(details.Resolution, want) {
+			t.Errorf("resolution missing %q:\n%q", want, details.Resolution)
+		}
+	}
+	if strings.Contains(details.Resolution, "version--type") == false {
+		t.Errorf("inline double-dash must not be split: %q", details.Resolution)
 	}
 	if details.ViewURI != "https://access.redhat.com/solutions/7010411" {
 		t.Errorf("view_uri fallback = %q", details.ViewURI)
+	}
+}
+
+func TestGetKCSRejectsNonNumericID(t *testing.T) {
+	swapGlobalAPI(t, &RedHatAPI{BaseURL: "http://unused", SSOURL: "http://unused", client: http.DefaultClient})
+	for _, bad := range []string{
+		"https://docs.redhat.com/en/documentation/openshift_container_platform/",
+		"labs-rearconfighelper",
+		"7010411 ",
+		"",
+	} {
+		if _, _, err := getKCS(context.Background(), nil, GetKCSParams{SolutionID: bad}); err == nil {
+			t.Errorf("expected error for non-numeric solution_id %q", bad)
+		}
+	}
+}
+
+func TestReflowMarkdown(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"empty", "", ""},
+		{"already structured", "line one\nline two", "line one\nline two"},
+		{"heading break", "intro text ## Workaround do this", "intro text\n\n## Workaround do this"},
+		{"bullet break", "first item- second item- third", "first item\n- second item\n- third"},
+		{"ordered break", "Follow these steps.1. Disable it.2. Restart it.", "Follow these steps.\n1. Disable it.\n2. Restart it."},
+		{"version numbers untouched", "Upgrade to 4.6.55 or 4.7.42 before upgrading", "Upgrade to 4.6.55 or 4.7.42 before upgrading"},
+		{"inline dash untouched", "run version--type json-p flags", "run version--type json-p flags"},
+		{"fence break", "before ~~~ oc get pods ~~~ after", "before\n\n~~~ oc get pods\n\n~~~ after"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := reflowMarkdown(tt.in); got != tt.want {
+				t.Errorf("reflowMarkdown(%q) =\n%q\nwant:\n%q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
