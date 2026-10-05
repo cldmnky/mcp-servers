@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -25,9 +26,10 @@ func initGlobalAPI() error {
 
 // Search Issues tool parameters
 type SearchIssuesParams struct {
-	Query         string `json:"query" jsonschema:"Search terms or a JQL expression. JQL is detected and passed through when it contains operators like 'project =' or '~'; free text is wrapped in a full-text search. Examples: 'project = OCPBUGS AND text ~ \"GPU passthrough\"' or 'ovnkube crashloop'"`
+	Query         string `json:"query" jsonschema:"Search terms or a JQL expression. By default, leading field/operator clauses or ORDER BY are detected as JQL; other input is wrapped in a full-text search. Use query_mode to disambiguate. Examples: 'project = OCPBUGS AND text ~ \"GPU passthrough\"' or 'ovnkube crashloop'"`
+	QueryMode     string `json:"query_mode,omitempty" jsonschema:"Query interpretation: auto (default), jql (pass through unchanged), or text (always wrap in a full-text search). Reuse the same mode when paginating"`
 	MaxResults    int    `json:"max_results,omitempty" jsonschema:"Page size, 1-100; defaults to 50. Keep modest to limit response size"`
-	NextPageToken string `json:"next_page_token,omitempty" jsonschema:"Continuation token returned by a previous search_issues call. Omit on the first page and reuse the exact same query when paginating"`
+	NextPageToken string `json:"next_page_token,omitempty" jsonschema:"Continuation token returned by a previous search_issues call. Omit on the first page and reuse the exact same query and query_mode when paginating"`
 }
 
 // JIRA Issue response
@@ -51,28 +53,34 @@ type SearchIssuesResult struct {
 	Query         string      `json:"query" jsonschema:"The JQL query used"`
 }
 
-// isJQLQuery attempts to detect if a query is already in JQL format
+// Detect a leading JQL clause, not boolean words embedded in plain text.
+// Field names may be identifiers, quoted names, or custom-field references;
+// whitespace around symbolic operators is optional. Auto-detection remains a
+// heuristic, so query_mode offers an explicit override for ambiguous input.
+var (
+	jqlClause = regexp.MustCompile(`(?i)^\s*(?:(?:NOT\b\s*|\()\s*)*` +
+		`(?:[a-z][a-z0-9_.]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|cf\[\d+\])\s*` +
+		`(?:[<>]=?|!=|!?~|=|\b(?:` +
+		`(?:NOT\s+IN|IN)\b\s*(?:\(|[a-z][a-z0-9_]*\s*\()` +
+		`|IS\s+(?:NOT\s+)?(?:EMPTY|NULL)\b|WAS\b|CHANGED\b))`)
+	jqlOrder = regexp.MustCompile(`(?i)^\s*ORDER\s+BY\s+\S`)
+)
+
 func isJQLQuery(query string) bool {
-	// Check for common JQL operators and syntax
-	jqlIndicators := []string{
-		" AND ", " OR ", " NOT ",
-		"project =", "project IN",
-		"summary ~", "description ~", "text ~",
-		"status =", "status IN",
-		"priority =", "priority IN",
-		"assignee =", "reporter =",
-		"created >=", "updated >=",
-		"key =", "key IN",
-	}
+	return jqlClause.MatchString(query) || jqlOrder.MatchString(query)
+}
 
-	queryUpper := strings.ToUpper(query)
-	for _, indicator := range jqlIndicators {
-		if strings.Contains(queryUpper, strings.ToUpper(indicator)) {
-			return true
-		}
+func resolveJQLQuery(query, mode string) (string, error) {
+	switch mode {
+	case "", "auto":
+		return buildJQLQuery(query), nil
+	case "jql":
+		return query, nil
+	case "text":
+		return buildTextJQLQuery(query), nil
+	default:
+		return "", fmt.Errorf("query_mode must be auto, jql, or text")
 	}
-
-	return false
 }
 
 // buildJQLQuery converts a natural language query to JQL
@@ -82,9 +90,14 @@ func buildJQLQuery(query string) string {
 		return query
 	}
 
-	// Otherwise, build a text search query that searches across multiple fields
-	// Using text ~ "query" searches summary, description, comments, and environment
-	escapedQuery := strings.ReplaceAll(query, `"`, `\"`)
+	return buildTextJQLQuery(query)
+}
+
+func buildTextJQLQuery(query string) string {
+	// Escape backslashes before quotes so literal text cannot break out of
+	// the JQL string. text ~ searches summary, description, comments, and environment.
+	escapedQuery := strings.ReplaceAll(query, `\`, `\\`)
+	escapedQuery = strings.ReplaceAll(escapedQuery, `"`, `\"`)
 
 	jql := fmt.Sprintf(`text ~ "%s"`, escapedQuery)
 
@@ -300,8 +313,11 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 		params.MaxResults = 100
 	}
 
-	// Convert query to JQL if needed
-	jqlQuery := buildJQLQuery(params.Query)
+	// Convert query to JQL if needed, honoring an explicit interpretation.
+	jqlQuery, err := resolveJQLQuery(params.Query, params.QueryMode)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Build search options
 	searchOpts := &jira.SearchOptionsV2{
@@ -508,9 +524,9 @@ func NewRedHatIssuesServer() (*mcp.Server, error) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "search_issues",
 		Description: "Search Red Hat Jira Cloud issues (https://redhat.atlassian.net), covering engineering bugs, features, and escalations in projects such as OCPBUGS, OCPENG, and OCPTRL.\n\n" +
-			"Input handling: if the query contains JQL operators (project =, status IN, ~, AND, OR), it is sent as-is; anything else is wrapped in a `text ~ \"...\"` full-text search across summary, description, comments, and environment. Prefer explicit JQL to filter precisely; use plain text only for broad topical searches.\n\n" +
+			"Input handling: query_mode defaults to auto, detecting leading JQL field/operator clauses (including project=, status IN, summary~, and custom fields) or ORDER BY; other input is wrapped in a `text ~ \"...\"` full-text search across summary, description, comments, and environment. Boolean words alone do not imply JQL. Set query_mode to jql for unchanged JQL or text for literal search terms when the input is ambiguous.\n\n" +
 			"Examples: `project = OCPBUGS AND text ~ \"GPU passthrough\"` (JQL) or `ovnkube crashloop after node reboot` (plain text).\n\n" +
-			"Returns one page of issues with key, summary, status, priority, target versions, fix versions, and a browse URL. Pagination is token-based: pass `next_page_token` from the response with the same query to fetch more; `is_last` marks the end. No exact total is available from the API. Typical page sizes fit well under the default of 50.\n\n" +
+			"Returns one page of issues with key, summary, status, priority, target versions, fix versions, and a browse URL. Pagination is token-based: pass `next_page_token` from the response with the same query and query_mode to fetch more; `is_last` marks the end. No exact total is available from the API. Typical page sizes fit well under the default of 50.\n\n" +
 			"Use get_issue to retrieve the full description of a result. For Red Hat knowledge-base articles, use search_kcs instead.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "Search Red Hat Jira issues",

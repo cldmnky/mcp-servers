@@ -33,7 +33,7 @@ Get a specific solution by ID and extract structured content with title, Environ
 - Articles: title, kind, environment, and abstract only — the full article body is not in the search index; use the `view_uri` link for the complete page. The response notes this. The index's raw `abstract` field is stored duplicated (publishedAbstract repeated, title appended); the server returns the clean `publishedAbstract` copy, or a deduplicated fallback for drafts, and never shows the auto-generated abstract on Solutions (it duplicates their issue text).
 
 **Formatting:**
-The search index flattens line breaks out of stored text, so articles arrive as single lines. The server re-inserts line breaks around Markdown block elements (headings, list items, numbered steps) to restore readable structure. Code fences are kept byte-for-byte verbatim — the index also eats spaces where line breaks used to be, so fenced commands come back mangled (`oc get nodes-o` for `oc get nodes -o`) — and the response includes a warning that they are not executable as returned. Inline constructs such as links, `--flags`, and version numbers are left untouched.
+The search index flattens line breaks out of stored text, so articles arrive as single lines. The server re-inserts line breaks around Markdown block elements (headings, list items, numbered steps) to restore readable structure. Code fences are kept byte-for-byte verbatim — the index also eats spaces where line breaks used to be, so fenced commands come back mangled (`oc get nodes-o` for `oc get nodes -o`) — and the response includes a warning that they are not executable as returned. Unterminated fences in flattened text are closed for display without attempting to repair their code content. Inline constructs such as links, `--flags`, and version numbers are left untouched.
 
 ## Setup
 
@@ -97,11 +97,11 @@ The HTTP server will be available at `http://localhost:8080` and can be used wit
 - `-v`: Verbose (debug) logging; equivalent to `LOG_LEVEL=debug`
 - `-help`: Show help message
 
-The HTTP server applies read/write/idle timeouts and shuts down gracefully on SIGINT/SIGTERM.
+HTTP mode has no client authentication; bind to localhost or use an authenticated proxy. The HTTP server applies read/write/idle timeouts, expires stateful MCP sessions after 10 minutes without new requests, and shuts down gracefully on SIGINT/SIGTERM. Reinitialize after HTTP 404 for an expired session.
 
 ### Logging
 
-Logs are quiet by default: only warnings and errors are recorded. `LOG_LEVEL=debug` (or `-v`) enables per-request detail. The log file (`rhkcs-mcp.log`) is size-rotated (10 MB), compressed, and old backups are pruned (5 backups, 30 days). HTTP mode mirrors log output to stderr; stdio mode writes to the file only, keeping stdout clean for the MCP protocol.
+Logs are quiet by default: only warnings and errors are recorded. `LOG_LEVEL=debug` (or `-v`) enables per-request detail. The log file (`rhkcs-mcp.log`) is size-rotated (10 MB), compressed, and old backups are pruned (5 backups, 30 days). HTTP mode mirrors log output to stderr; stdio mode normally writes to the file only. If opening, writing, or rotating the log fails, messages fall back to stderr in either mode, keeping stdout clean for the MCP protocol.
 
 ### Example Usage with Claude Desktop
 
@@ -174,7 +174,7 @@ The server is built using:
 
 ## Error Handling
 
-The server includes error handling for authentication failures, network connectivity issues, invalid parameters, and missing resources. API errors returned to MCP clients include the HTTP status and a bounded excerpt of the response body.
+The server includes error handling for authentication failures, network connectivity issues, invalid parameters, and missing resources. API errors returned to MCP clients include the HTTP status and a bounded excerpt of the response body. `get_kcs` returns a tool error when no matching document is found or the response shape is unexpected; a found document with no indexed body still returns its metadata with an explanatory note.
 
 ## Development
 

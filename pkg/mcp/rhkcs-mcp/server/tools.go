@@ -241,42 +241,51 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 		return nil, nil, fmt.Errorf("failed to get KCS solution: %w", err)
 	}
 
-	details := &KCSDetails{}
+	// Distinguish a missing document from a found document with no indexed
+	// body. Unexpected response shapes must not look like successful fetches.
+	response, ok := result["response"].(map[string]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("unexpected KCS response: missing response object")
+	}
+	docs, ok := response["docs"].([]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("unexpected KCS response: missing docs array")
+	}
+	if len(docs) == 0 {
+		return nil, nil, fmt.Errorf("KCS document %s not found or not accessible", params.SolutionID)
+	}
+	doc, ok := docs[0].(map[string]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("unexpected KCS response: document is not an object")
+	}
 
-	// The search API returns { "response": { "docs": [...] } }
-	if response, ok := result["response"].(map[string]interface{}); ok {
-		if docs, ok := response["docs"].([]interface{}); ok && len(docs) > 0 {
-			if doc, ok := docs[0].(map[string]interface{}); ok {
-				// Some fields come as strings, others as arrays. Long text
-				// fields arrive flattened to a single line; reflowMarkdown
-				// restores the line structure of their block elements.
-				if title, ok := doc["publishedTitle"].(string); ok {
-					details.Title = title
-				} else if title, ok := doc["allTitle"].(string); ok {
-					details.Title = title
-				}
-				if kind, ok := doc["documentKind"].(string); ok {
-					details.Kind = kind
-				}
-				details.Environment = firstString(doc["standard_product"])
-				// Articles carry only an abstract; Solutions get an
-				// auto-generated abstract that duplicates their issue text,
-				// so it is not shown for them.
-				if details.Kind == "Article" {
-					abs := firstString(doc["publishedAbstract"])
-					if abs == "" {
-						abs = dedupeAbstract(firstString(doc["abstract"]), details.Title)
-					}
-					details.Abstract = abs
-				}
-				details.Issue = reflowMarkdown(firstString(doc["issue"]))
-				details.Resolution = reflowMarkdown(firstString(doc["solution_resolution"]))
-				details.RootCause = reflowMarkdown(firstString(doc["solution_rootcause"]))
-				if viewURI, ok := doc["view_uri"].(string); ok {
-					details.ViewURI = viewURI
-				}
-			}
+	// Some fields come as strings, others as arrays. Long text fields arrive
+	// flattened to a single line; reflowMarkdown restores block structure.
+	details := &KCSDetails{Title: firstString(doc["publishedTitle"])}
+	if strings.TrimSpace(details.Title) == "" {
+		details.Title = firstString(doc["allTitle"])
+	}
+	if strings.TrimSpace(details.Title) == "" {
+		return nil, nil, fmt.Errorf("unexpected KCS response: document has no title")
+	}
+	if kind, ok := doc["documentKind"].(string); ok {
+		details.Kind = kind
+	}
+	details.Environment = firstString(doc["standard_product"])
+	// Articles carry only an abstract; Solutions get an auto-generated
+	// abstract that duplicates their issue text, so it is not shown for them.
+	if details.Kind == "Article" {
+		abs := firstString(doc["publishedAbstract"])
+		if abs == "" {
+			abs = dedupeAbstract(firstString(doc["abstract"]), details.Title)
 		}
+		details.Abstract = abs
+	}
+	details.Issue = reflowMarkdown(firstString(doc["issue"]))
+	details.Resolution = reflowMarkdown(firstString(doc["solution_resolution"]))
+	details.RootCause = reflowMarkdown(firstString(doc["solution_rootcause"]))
+	if viewURI, ok := doc["view_uri"].(string); ok {
+		details.ViewURI = viewURI
 	}
 
 	// Fallback: construct ViewURI if not found in response
@@ -383,7 +392,13 @@ func reflowMarkdown(s string) string {
 			b.WriteString("\n")
 			b.WriteString(strings.TrimSpace(part))
 			b.WriteString("\n")
-			b.WriteString(markers[i]) // closing fence
+			if i < len(markers) {
+				b.WriteString(markers[i]) // closing fence
+			} else {
+				// An unterminated upstream fence consumes the remaining text.
+				// Close it for display without guessing or rewriting its body.
+				b.WriteString(markers[i-1])
+			}
 			b.WriteString("\n\n")
 		}
 	}

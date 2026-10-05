@@ -81,7 +81,7 @@ make install          # Build both and copy them to ~/bin (override with INSTALL
 ./bin/rhkcs-mcp        # uses RH_API_OFFLINE_TOKEN
 ```
 
-In stdio mode, stdout is reserved for the MCP protocol; logs go to the log file only.
+In stdio mode, stdout is reserved for the MCP protocol; logs go to the log file, falling back to stderr if the file cannot be written.
 
 ### Streamable HTTP (for MCP clients that connect over HTTP)
 
@@ -90,7 +90,7 @@ In stdio mode, stdout is reserved for the MCP protocol; logs go to the log file 
 ./bin/rhkcs-mcp -http localhost:8080
 ```
 
-KCS-only shortcuts: `make run-mcp` (stdio) and `make run-mcp-http` (HTTP on `:8080`, which binds **all interfaces**). HTTP mode has **no client authentication** — bind to localhost or put an authenticated proxy in front before exposing it further. It applies connection timeouts and shuts down gracefully on SIGINT/SIGTERM.
+KCS-only shortcuts: `make run-mcp` (stdio) and `make run-mcp-http` (HTTP on `:8080`, which binds **all interfaces**). HTTP mode has **no client authentication** — bind to localhost or put an authenticated proxy in front before exposing it further. It applies connection timeouts, expires stateful MCP sessions after 10 minutes without new requests, and shuts down gracefully on SIGINT/SIGTERM. Clients must reinitialize if an expired session returns HTTP 404.
 
 Run `<binary> -help` for the full option list, including copy-paste MCP client setup snippets.
 
@@ -180,7 +180,7 @@ Add `rh-issues-mcp` the same way with `RH_JIRA_EMAIL` and `RH_JIRA_TOKEN`.
 | `-v` | Verbose (debug) logging; same as `LOG_LEVEL=debug` |
 | `-help` | Full help, including MCP client setup snippets |
 
-Logs are quiet by default: only warnings and errors. Set `LOG_LEVEL` to `debug`, `info`, `warn` (default), or `error`. The log file (`rh-issues-mcp.log` / `rhkcs-mcp.log`) is size-rotated (10 MB, 5 backups, 30 days, compressed) and created lazily — a quiet server writes no log file.
+Logs are quiet by default: only warnings and errors. Set `LOG_LEVEL` to `debug`, `info`, `warn` (default), or `error`. The log file (`rh-issues-mcp.log` / `rhkcs-mcp.log`) is size-rotated (10 MB, 5 backups, 30 days, compressed) and created lazily — a quiet server writes no log file. If opening, writing, or rotating the log fails, the complete message is sent to stderr instead.
 
 ## Development
 

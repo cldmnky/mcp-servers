@@ -110,15 +110,37 @@ func Init(opts Options) (path string, cleanup func()) {
 		Compress:   true,
 	}
 
-	var w io.Writer = rotator
-	if opts.Stderr {
-		w = io.MultiWriter(os.Stderr, rotator)
-	}
-	std.SetOutput(w)
+	std.SetOutput(&fallbackWriter{
+		primary:  rotator,
+		fallback: os.Stderr,
+		mirror:   opts.Stderr,
+	})
 
 	return path, func() {
 		_ = rotator.Close()
 	}
+}
+
+// fallbackWriter preserves lazy log creation and falls back on each failed
+// write (including rotation failures). In HTTP mode it mirrors each message
+// exactly once, even when the file write fails. It has no mutable state;
+// log.Logger serializes writes and lumberjack guards the file itself.
+type fallbackWriter struct {
+	primary  io.Writer
+	fallback io.Writer
+	mirror   bool
+}
+
+func (w *fallbackWriter) Write(p []byte) (int, error) {
+	n, err := w.primary.Write(p)
+	if err == nil && n == len(p) && !w.mirror {
+		return n, nil
+	}
+	n, err = w.fallback.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	return n, err
 }
 
 func setLevel(verbose bool, env string) {

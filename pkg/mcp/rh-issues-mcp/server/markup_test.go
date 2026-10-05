@@ -71,6 +71,23 @@ func TestJiraToMarkdownEscapedFences(t *testing.T) {
 	}
 }
 
+func TestJiraToMarkdownSameLineFences(t *testing.T) {
+	for _, tt := range []struct{ name, input, want string }{
+		{"code", "{code}oc get pods{code}\nafter *bold*", "```\noc get pods\n```\nafter **bold**"},
+		{"noformat", "{noformat}*literal*{noformat} after *bold*", "```\n*literal*\n```\nafter **bold**"},
+		{"language", "{code:bash}oc get nodes --show-labels{code}\nh2. Next", "```bash\noc get nodes --show-labels\n```\n## Next"},
+		{"escaped", "\\{code}{{literal}}\\{code} tail", "```\n{{literal}}\n```\ntail"},
+		{"empty", "{code}{code}\nprose", "```\n```\nprose"},
+		{"code whitespace", "{code}  command  {code}", "```\n  command  \n```"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := jiraToMarkdown(tt.input); got != tt.want {
+				t.Errorf("jiraToMarkdown(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestJiraToMarkdownEmpty(t *testing.T) {
 	if got := jiraToMarkdown(""); got != "" {
 		t.Errorf("empty input should stay empty, got %q", got)

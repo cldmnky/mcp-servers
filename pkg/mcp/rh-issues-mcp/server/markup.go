@@ -67,7 +67,19 @@ func jiraToMarkdown(s string) string {
 			inFence = true
 			lang := strings.TrimSpace(m[2])
 			out = append(out, "```"+lang)
-			if rest := strings.TrimSpace(trimmed[len(m[0]):]); rest != "" {
+			rest := trimmed[len(m[0]):]
+			if close := jiraFenceClose.FindStringSubmatch(rest); close != nil {
+				// A block may open and close on the same line. Keep its code
+				// verbatim and resume prose conversion after the closing marker.
+				if strings.TrimSpace(close[1]) != "" {
+					out = append(out, close[1])
+				}
+				out = append(out, "```")
+				inFence = false
+				if tail := strings.TrimSpace(close[3]); tail != "" {
+					out = append(out, jiraInline(tail))
+				}
+			} else if rest = strings.TrimSpace(rest); rest != "" {
 				out = append(out, rest)
 			}
 			continue

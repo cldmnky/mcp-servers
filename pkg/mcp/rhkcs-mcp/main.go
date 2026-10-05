@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/cldmnky/mcp-servers/internal/logging"
+	"github.com/cldmnky/mcp-servers/internal/mcphttp"
 	"github.com/cldmnky/mcp-servers/internal/setuphelp"
 	"github.com/cldmnky/mcp-servers/pkg/mcp/rhkcs-mcp/server"
 )
@@ -95,9 +96,7 @@ func main() {
 // serveHTTP runs the Streamable HTTP transport with bounded timeouts and
 // graceful shutdown on SIGINT/SIGTERM. It returns nil on a clean shutdown.
 func serveHTTP(ctx context.Context, addr string, mcpServer *mcp.Server, logPath string) error {
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-		return mcpServer
-	}, nil)
+	handler := mcphttp.NewHandler(mcpServer)
 
 	srv := &http.Server{
 		Addr:    addr,
