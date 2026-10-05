@@ -3,12 +3,13 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	jira "github.com/andygrunwald/go-jira/v2/cloud"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/cldmnky/mcp-servers/internal/logging"
 )
 
 // Global API client instance
@@ -81,22 +82,19 @@ func buildJQLQuery(query string) string {
 	// Using text ~ "query" searches summary, description, comments, and environment
 	escapedQuery := strings.ReplaceAll(query, `"`, `\"`)
 
-	// Build a comprehensive search that looks in key fields
 	jql := fmt.Sprintf(`text ~ "%s"`, escapedQuery)
 
-	log.Printf("[buildJQLQuery] Converted natural language query %q to JQL: %q", query, jql)
+	logging.Debugf("[buildJQLQuery] converted natural language query %q to JQL: %q", query, jql)
 	return jql
 }
 
 // Search JIRA Issues
 func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIssuesParams) (*mcp.CallToolResult, *SearchIssuesResult, error) {
-	log.Printf("[search_issues] Starting search with query: %q, maxResults: %d", params.Query, params.MaxResults)
 	if params.MaxResults < 0 {
 		return nil, nil, fmt.Errorf("max_results must be positive")
 	}
 
 	if globalAPI == nil {
-		log.Println("[search_issues] ERROR: JIRA API client not initialized")
 		return nil, nil, fmt.Errorf("JIRA API client not initialized")
 	}
 
@@ -107,7 +105,6 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 
 	// Convert query to JQL if needed
 	jqlQuery := buildJQLQuery(params.Query)
-	log.Printf("[search_issues] Using JQL query: %q", jqlQuery)
 
 	// Build search options
 	searchOpts := &jira.SearchOptionsV2{
@@ -119,11 +116,8 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 	// Make API request using go-jira library
 	issues, searchResult, err := globalAPI.SearchIssues(ctx, jqlQuery, searchOpts)
 	if err != nil {
-		log.Printf("[search_issues] ERROR: API request failed for query %q: %v", params.Query, err)
 		return nil, nil, fmt.Errorf("failed to search JIRA issues: %w", err)
 	}
-
-	log.Printf("[search_issues] Query %q completed successfully, found %d issues", params.Query, len(issues))
 
 	// Convert jira.Issue to our JiraIssue format
 	// Keep empty search results as [] rather than null for the MCP array schema.
@@ -149,7 +143,7 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 		jiraIssues = append(jiraIssues, jiraIssue)
 	}
 
-	log.Printf("[search_issues] Successfully parsed %d issues", len(jiraIssues))
+	logging.Debugf("[search_issues] query=%q found %d issues", params.Query, len(jiraIssues))
 
 	result := &SearchIssuesResult{
 		Issues:        jiraIssues,
@@ -199,23 +193,15 @@ type JiraIssueDetails struct {
 
 // Get JIRA Issue by key
 func getIssue(ctx context.Context, req *mcp.CallToolRequest, params GetIssueParams) (*mcp.CallToolResult, *JiraIssueDetails, error) {
-	log.Printf("[get_issue] Getting issue with key: %s", params.IssueKey)
-
 	if globalAPI == nil {
-		log.Println("[get_issue] ERROR: JIRA API client not initialized")
 		return nil, nil, fmt.Errorf("JIRA API client not initialized")
 	}
-
-	log.Printf("[get_issue] Executing query for issue key: %s", params.IssueKey)
 
 	// Make API request using go-jira library
 	issue, err := globalAPI.GetIssue(ctx, params.IssueKey)
 	if err != nil {
-		log.Printf("[get_issue] ERROR: API request failed for issue %s: %v", params.IssueKey, err)
 		return nil, nil, fmt.Errorf("failed to get JIRA issue: %w", err)
 	}
-
-	log.Printf("[get_issue] Query for issue %s completed successfully", params.IssueKey)
 
 	// Parse response
 	details := &JiraIssueDetails{
@@ -240,7 +226,7 @@ func getIssue(ctx context.Context, req *mcp.CallToolRequest, params GetIssuePara
 		details.Updated = time.Time(issue.Fields.Updated).Format("2006-01-02 15:04:05")
 	}
 
-	log.Printf("[get_issue] Successfully retrieved issue: %s", details.Key) // Build detailed response with link
+	// Build detailed response with link
 	responseText := fmt.Sprintf("**%s: %s**\n\nLink: %s\n\n", details.Key, details.Summary, details.ViewURI)
 	responseText += fmt.Sprintf("**Status:** %s\n**Priority:** %s\n\n", details.Status, details.Priority)
 	if details.Created != "" {
@@ -264,22 +250,16 @@ func getIssue(ctx context.Context, req *mcp.CallToolRequest, params GetIssuePara
 
 // NewRedHatIssuesServer creates a new MCP server with Red Hat JIRA tools
 func NewRedHatIssuesServer() (*mcp.Server, error) {
-	log.Println("[server] Initializing Red Hat JIRA Issues MCP server")
-
 	// Initialize the global API client
 	if err := initGlobalAPI(); err != nil {
-		log.Printf("[server] ERROR: Failed to initialize API client: %v", err)
 		return nil, fmt.Errorf("failed to initialize JIRA API client: %w", err)
 	}
-	log.Println("[server] JIRA API client initialized successfully")
 
 	// Create MCP server
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "RedHat JIRA Issues API",
 		Version: "1.0.0",
 	}, nil)
-
-	log.Println("[server] Registering tools: search_issues, get_issue")
 
 	// Add search issues tool
 	mcp.AddTool(server, &mcp.Tool{
@@ -293,6 +273,5 @@ func NewRedHatIssuesServer() (*mcp.Server, error) {
 		Description: "Retrieve the full details of a specific Red Hat JIRA issue by its key (e.g., OCPBUGS-55179). Returns structured information including Key, Summary, Description, Status, Priority, Created date, and Updated date. Use search_issues first if you need to find issue keys, or use this directly if you already know the issue key from a KCS article or other source.",
 	}, getIssue)
 
-	log.Println("[server] Red Hat JIRA Issues MCP server created successfully")
 	return server, nil
 }

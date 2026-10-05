@@ -11,14 +11,9 @@ Search for Red Hat KCS Solutions and Articles, returning a list with Solution ID
 
 **Parameters:**
 - `query` (string, required): Search query string
-- `rows` (int, optional): Number of results to return (default: 50)
+- `rows` (int, optional): Number of results to return (default: 10)
 - `start` (int, optional): Starting index for pagination (default: 0)
-- `session_id` (string, optional): Optional session ID
-
-**Filtering:**
-By default, returns only documents where:
-- `documentKind` is either "Article" or "Solution"
-- `accessState` is either "active" or "private"
+- `session_id` (string, optional): Deprecated; accepted for backwards compatibility and ignored.
 
 **Returns:**
 - List of solutions with ID, title, score, and view URI
@@ -28,7 +23,7 @@ Get a specific solution by ID and extract structured content with title, Environ
 
 **Parameters:**
 - `solution_id` (string, required): The ID of the solution to retrieve
-- `session_id` (string, optional): Optional session ID
+- `session_id` (string, optional): Deprecated; accepted for backwards compatibility and ignored.
 
 **Returns:**
 - Detailed solution with title, environment, issue, resolution, and root cause
@@ -90,8 +85,16 @@ The HTTP server will be available at `http://localhost:8080` and can be used wit
 
 ### Command Line Options
 
-- `-http <address>`: Run as HTTP server on the specified address (e.g., `:8080`)
+- `-http <address>`: Run as HTTP server on the specified address (e.g., `localhost:8080`)
+- `-log-dir <dir>`: Directory for the rotated log file (default: beside the binary)
+- `-v`: Verbose (debug) logging; equivalent to `LOG_LEVEL=debug`
 - `-help`: Show help message
+
+The HTTP server applies read/write/idle timeouts and shuts down gracefully on SIGINT/SIGTERM.
+
+### Logging
+
+Logs are quiet by default: only warnings and errors are recorded. `LOG_LEVEL=debug` (or `-v`) enables per-request detail. The log file (`rhkcs-mcp.log`) is size-rotated (10 MB), compressed, and old backups are pruned (5 backups, 30 days). HTTP mode mirrors log output to stderr; stdio mode writes to the file only, keeping stdout clean for the MCP protocol.
 
 ### Example Usage with Claude Desktop
 
@@ -128,13 +131,7 @@ The server is built using:
 
 ## Error Handling
 
-The server includes comprehensive error handling for:
-
-- Authentication failures
-- API rate limiting
-- Network connectivity issues
-- Invalid parameters
-- Missing resources
+The server includes error handling for authentication failures, network connectivity issues, invalid parameters, and missing resources. API errors returned to MCP clients include the HTTP status and a bounded excerpt of the response body.
 
 ## Development
 
@@ -145,9 +142,12 @@ pkg/mcp/rhkcs-mcp/
 ├── main.go           # Main entry point and CLI handling
 ├── server/
 │   ├── api.go        # Red Hat API client implementation
+│   ├── api_test.go   # httptest-based client and tool tests
 │   └── tools.go      # MCP tool implementations
 └── README.md         # This file
 ```
+
+Tests run without real credentials or network access: `go test ./pkg/mcp/rhkcs-mcp/...` (add `-race` to exercise the token-refresh lock).
 
 ### Contributing
 

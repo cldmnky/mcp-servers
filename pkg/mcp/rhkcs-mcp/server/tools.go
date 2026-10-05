@@ -3,9 +3,10 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/cldmnky/mcp-servers/internal/logging"
 )
 
 // Global API client instance
@@ -20,10 +21,12 @@ func initGlobalAPI() error {
 
 // Search KCS tool parameters
 type SearchKCSParams struct {
-	Query     string `json:"query" jsonschema:"Search query string"`
-	Rows      int    `json:"rows,omitempty" jsonschema:"Number of results to return (default: 50)"`
-	Start     int    `json:"start,omitempty" jsonschema:"Starting index for pagination (default: 0)"`
-	SessionID string `json:"session_id,omitempty" jsonschema:"Optional session ID"`
+	Query string `json:"query" jsonschema:"Search query string"`
+	Rows  int    `json:"rows,omitempty" jsonschema:"Number of results to return (default: 10)"`
+	Start int    `json:"start,omitempty" jsonschema:"Starting index for pagination (default: 0)"`
+	// SessionID is accepted for backwards compatibility with clients
+	// configured against older versions of this server; it is ignored.
+	SessionID string `json:"session_id,omitempty" jsonschema:"Deprecated: accepted for backwards compatibility and ignored"`
 }
 
 // KCS Solution response
@@ -43,10 +46,14 @@ type SearchKCSResult struct {
 
 // Search KCS Solutions
 func searchKCS(ctx context.Context, req *mcp.CallToolRequest, params SearchKCSParams) (*mcp.CallToolResult, *SearchKCSResult, error) {
-	log.Printf("[search_kcs] Starting search with query: %q, rows: %d, start: %d", params.Query, params.Rows, params.Start)
+	if params.Rows < 0 {
+		return nil, nil, fmt.Errorf("rows must be positive")
+	}
+	if params.Start < 0 {
+		return nil, nil, fmt.Errorf("start must be positive")
+	}
 
 	if globalAPI == nil {
-		log.Println("[search_kcs] ERROR: Red Hat API client not initialized")
 		return nil, nil, fmt.Errorf("Red Hat API client not initialized")
 	}
 
@@ -55,9 +62,9 @@ func searchKCS(ctx context.Context, req *mcp.CallToolRequest, params SearchKCSPa
 		params.Rows = 10
 	}
 
-	// Use the Solr Search API per Case Management API documentation
-	// This matches the SolrSearchRequest structure from the API docs
-	// The 'expression' parameter is REQUIRED and specifies field list (fl), filters (fq), and sorting
+	// Use the Solr Search API per Case Management API documentation.
+	// The 'expression' parameter is REQUIRED and specifies field list (fl),
+	// filters (fq), and sorting.
 	requestData := map[string]interface{}{
 		"clientName": "mcp",
 		"q":          params.Query,
@@ -66,27 +73,50 @@ func searchKCS(ctx context.Context, req *mcp.CallToolRequest, params SearchKCSPa
 		"expression": "fl=id,allTitle,publishedTitle,score,view_uri,documentKind,standard_product&sort=score DESC",
 	}
 
-	log.Printf("[search_kcs] Executing query: %q", params.Query)
-	log.Println("[search_kcs] Making API request to /hydra/rest/search/v2/kcs")
+	logging.Debugf("[search_kcs] query=%q rows=%d start=%d", params.Query, params.Rows, params.Start)
 
-	// Make API request - using /hydra/rest/search/v2/kcs which accepts the SolrSearchRequest
 	result, err := globalAPI.MakeRequest(ctx, "POST", "/hydra/rest/search/v2/kcs", requestData)
 	if err != nil {
-		log.Printf("[search_kcs] ERROR: API request failed for query %q: %v", params.Query, err)
 		return nil, nil, fmt.Errorf("failed to search KCS: %w", err)
 	}
 
-	log.Printf("[search_kcs] Query %q completed successfully", params.Query)
-	log.Printf("[search_kcs] Response structure: %+v", result)
+	solutions := parseKCSSolutions(result)
+	logging.Debugf("[search_kcs] query=%q parsed %d solutions", params.Query, len(solutions))
 
-	// Parse response
+	searchResult := &SearchKCSResult{
+		Solutions: solutions,
+		Count:     len(solutions),
+		Query:     params.Query,
+	}
+
+	var responseText string
+	if len(solutions) == 0 {
+		responseText = fmt.Sprintf("No KCS solutions found for query: %s", params.Query)
+	} else {
+		responseText = fmt.Sprintf("Found %d KCS solutions for query: %s\n\n", len(solutions), params.Query)
+		for i, sol := range solutions {
+			responseText += fmt.Sprintf("%d. **%s** (ID: %s, Score: %.2f)\n   Link: %s\n\n",
+				i+1, sol.Title, sol.ID, sol.Score, sol.ViewURI)
+		}
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: responseText,
+			},
+		},
+	}, searchResult, nil
+}
+
+// parseKCSSolutions extracts solutions from either of the two response
+// shapes returned by the search API: {"response": {"docs": [...]}} or
+// {"results": [...]}.
+func parseKCSSolutions(result map[string]interface{}) []KCSSolution {
 	var solutions []KCSSolution
 
-	// Try multiple response structures
-	// Structure 1: { "response": { "docs": [...] } }
 	if response, ok := result["response"].(map[string]interface{}); ok {
 		if docs, ok := response["docs"].([]interface{}); ok {
-			log.Printf("[search_kcs] Found %d docs in response.docs", len(docs))
 			for _, doc := range docs {
 				if docMap, ok := doc.(map[string]interface{}); ok {
 					solution := KCSSolution{}
@@ -117,10 +147,8 @@ func searchKCS(ctx context.Context, req *mcp.CallToolRequest, params SearchKCSPa
 		}
 	}
 
-	// Structure 2: { "results": [...] }
 	if len(solutions) == 0 {
 		if results, ok := result["results"].([]interface{}); ok {
-			log.Printf("[search_kcs] Found %d results directly", len(results))
 			for _, doc := range results {
 				if docMap, ok := doc.(map[string]interface{}); ok {
 					solution := KCSSolution{}
@@ -149,37 +177,15 @@ func searchKCS(ctx context.Context, req *mcp.CallToolRequest, params SearchKCSPa
 		}
 	}
 
-	log.Printf("[search_kcs] Successfully parsed %d solutions", len(solutions))
+	return solutions
+}
 
-	searchResult := &SearchKCSResult{
-		Solutions: solutions,
-		Count:     len(solutions),
-		Query:     params.Query,
-	}
-
-	// Build a detailed response with links
-	var responseText string
-	if len(solutions) == 0 {
-		responseText = fmt.Sprintf("No KCS solutions found for query: %s", params.Query)
-	} else {
-		responseText = fmt.Sprintf("Found %d KCS solutions for query: %s\n\n", len(solutions), params.Query)
-		for i, sol := range solutions {
-			responseText += fmt.Sprintf("%d. **%s** (ID: %s, Score: %.2f)\n   Link: %s\n\n",
-				i+1, sol.Title, sol.ID, sol.Score, sol.ViewURI)
-		}
-	}
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			&mcp.TextContent{
-				Text: responseText,
-			},
-		},
-	}, searchResult, nil
-} // Get KCS tool parameters
+// Get KCS tool parameters
 type GetKCSParams struct {
 	SolutionID string `json:"solution_id" jsonschema:"The ID of the solution to retrieve"`
-	SessionID  string `json:"session_id,omitempty" jsonschema:"Optional session ID"`
+	// SessionID is accepted for backwards compatibility with clients
+	// configured against older versions of this server; it is ignored.
+	SessionID string `json:"session_id,omitempty" jsonschema:"Deprecated: accepted for backwards compatibility and ignored"`
 }
 
 // KCS Solution details
@@ -194,85 +200,41 @@ type KCSDetails struct {
 
 // Get KCS Solution by ID
 func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) (*mcp.CallToolResult, *KCSDetails, error) {
-	log.Printf("[get_kcs] Getting solution with ID: %s", params.SolutionID)
-
 	if globalAPI == nil {
-		log.Println("[get_kcs] ERROR: Red Hat API client not initialized")
 		return nil, nil, fmt.Errorf("Red Hat API client not initialized")
 	}
 
-	log.Printf("[get_kcs] Executing query for solution ID: %s", params.SolutionID)
-	log.Printf("[get_kcs] Making API request to /hydra/rest/search/v2/kcs with id query")
-
-	// Use the KCS search API with an ID query to get the full solution
-	// The search API supports field selection through the 'expression' parameter
-	// Request specific fields: publishedTitle, standard_product, issue, solution_resolution, solution_rootcause, view_uri
+	// Use the KCS search API with an ID query to get the full solution.
+	// The search API supports field selection through the 'expression' parameter.
 	requestData := map[string]interface{}{
 		"clientName": "mcp",
 		"q":          fmt.Sprintf("id:%s", params.SolutionID),
 		"expression": "fl=publishedTitle,allTitle,standard_product,issue,solution_resolution,solution_rootcause,view_uri,id",
 	}
 
+	logging.Debugf("[get_kcs] solution ID: %s", params.SolutionID)
+
 	result, err := globalAPI.MakeRequest(ctx, "POST", "/hydra/rest/search/v2/kcs", requestData)
 	if err != nil {
-		log.Printf("[get_kcs] ERROR: API request failed for solution ID %s: %v", params.SolutionID, err)
 		return nil, nil, fmt.Errorf("failed to get KCS solution: %w", err)
 	}
 
-	log.Printf("[get_kcs] Query for solution ID %s completed successfully", params.SolutionID)
-
-	// Parse response - search API returns { "response": { "docs": [...] } }
 	details := &KCSDetails{}
 
-	// Check if we got a result
+	// The search API returns { "response": { "docs": [...] } }
 	if response, ok := result["response"].(map[string]interface{}); ok {
 		if docs, ok := response["docs"].([]interface{}); ok && len(docs) > 0 {
 			if doc, ok := docs[0].(map[string]interface{}); ok {
-				// Extract fields from the document
-				// Note: Some fields come as strings, others as arrays
+				// Some fields come as strings, others as arrays.
 				if title, ok := doc["publishedTitle"].(string); ok {
 					details.Title = title
 				} else if title, ok := doc["allTitle"].(string); ok {
 					details.Title = title
 				}
-
-				// standard_product can be a string or array
-				if env, ok := doc["standard_product"].(string); ok {
-					details.Environment = env
-				} else if envArr, ok := doc["standard_product"].([]interface{}); ok && len(envArr) > 0 {
-					if envStr, ok := envArr[0].(string); ok {
-						details.Environment = envStr
-					}
-				}
-
-				// issue is typically an array
-				if issue, ok := doc["issue"].(string); ok {
-					details.Issue = issue
-				} else if issueArr, ok := doc["issue"].([]interface{}); ok && len(issueArr) > 0 {
-					if issueStr, ok := issueArr[0].(string); ok {
-						details.Issue = issueStr
-					}
-				}
-
-				// solution_resolution is typically an array
-				if resolution, ok := doc["solution_resolution"].(string); ok {
-					details.Resolution = resolution
-				} else if resArr, ok := doc["solution_resolution"].([]interface{}); ok && len(resArr) > 0 {
-					if resStr, ok := resArr[0].(string); ok {
-						details.Resolution = resStr
-					}
-				}
-
-				// solution_rootcause is typically an array (optional field)
-				if rootCause, ok := doc["solution_rootcause"].(string); ok {
-					details.RootCause = rootCause
-				} else if rcArr, ok := doc["solution_rootcause"].([]interface{}); ok && len(rcArr) > 0 {
-					if rcStr, ok := rcArr[0].(string); ok {
-						details.RootCause = rcStr
-					}
-				}
-
-				// Get view_uri from response or construct from ID
+				details.Environment = firstString(doc["standard_product"])
+				details.Issue = firstString(doc["issue"])
+				details.Resolution = firstString(doc["solution_resolution"])
+				details.RootCause = firstString(doc["solution_rootcause"])
 				if viewURI, ok := doc["view_uri"].(string); ok {
 					details.ViewURI = viewURI
 				}
@@ -285,9 +247,6 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 		details.ViewURI = fmt.Sprintf("https://access.redhat.com/solutions/%s", params.SolutionID)
 	}
 
-	log.Printf("[get_kcs] Successfully retrieved solution: %s", details.Title)
-
-	// Build detailed response with link
 	responseText := fmt.Sprintf("**%s**\n\nLink: %s\n\n", details.Title, details.ViewURI)
 	if details.Environment != "" {
 		responseText += fmt.Sprintf("**Environment:** %s\n\n", details.Environment)
@@ -311,16 +270,28 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 	}, details, nil
 }
 
+// firstString extracts the first value of a field that may arrive either as
+// a plain string or as a list of strings.
+func firstString(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case []interface{}:
+		if len(val) > 0 {
+			if s, ok := val[0].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 // NewRedHatKCSServer creates a new MCP server with Red Hat KCS tools
 func NewRedHatKCSServer() (*mcp.Server, error) {
-	log.Println("[server] Initializing Red Hat KCS MCP server")
-
 	// Initialize the global API client
 	if err := initGlobalAPI(); err != nil {
-		log.Printf("[server] ERROR: Failed to initialize API client: %v", err)
 		return nil, fmt.Errorf("failed to initialize Red Hat API client: %w", err)
 	}
-	log.Println("[server] Red Hat API client initialized successfully")
 
 	// Create MCP server
 	server := mcp.NewServer(&mcp.Implementation{
@@ -328,12 +299,10 @@ func NewRedHatKCSServer() (*mcp.Server, error) {
 		Version: "1.0.0",
 	}, nil)
 
-	log.Println("[server] Registering tools: search_kcs, get_kcs")
-
 	// Add search KCS tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_kcs",
-		Description: "**ALWAYS USE THIS FIRST** when the user asks to search for, find, or look up Red Hat KCS (Knowledge Centered Service) articles, solutions, or knowledge base content. This tool searches the official Red Hat Customer Portal knowledge base and returns real KCS article IDs with titles, scores, and URLs. Returns only verified documents where documentKind is 'Article' or 'Solution' and accessState is 'active' or 'private'. Use this instead of making up fake KCS IDs or searching the general web for KCS content.",
+		Description: "**ALWAYS USE THIS FIRST** when the user asks to search for, find, or look up Red Hat KCS (Knowledge Centered Service) articles, solutions, or knowledge base content. This tool searches the official Red Hat Customer Portal knowledge base and returns real KCS article IDs with titles, scores, and URLs. Use this instead of making up fake KCS IDs or searching the general web for KCS content.",
 	}, searchKCS)
 
 	// Add get KCS tool
@@ -342,6 +311,5 @@ func NewRedHatKCSServer() (*mcp.Server, error) {
 		Description: "Retrieve the full detailed content of a specific Red Hat KCS solution by its ID (obtained from search_kcs results). Returns structured information including Title, Environment, Issue description, Resolution steps, and Root Cause analysis. Always use search_kcs first to get valid solution IDs before calling this tool.",
 	}, getKCS)
 
-	log.Println("[server] Red Hat KCS MCP server created successfully")
 	return server, nil
 }

@@ -2,59 +2,29 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/cldmnky/mcp-servers/internal/logging"
 	"github.com/cldmnky/mcp-servers/pkg/mcp/rh-issues-mcp/server"
 )
 
+const service = "rh-issues-mcp"
+
 var (
-	httpAddr = flag.String("http", "", "HTTP address to listen on (e.g., :8080)")
+	httpAddr = flag.String("http", "", "HTTP address to listen on (e.g., localhost:8081)")
+	logDir   = flag.String("log-dir", "", "directory for the rotated log file (default: beside the binary)")
+	verbose  = flag.Bool("v", false, "verbose (debug) logging; also settable via LOG_LEVEL")
 	help     = flag.Bool("help", false, "Show help message")
 )
-
-// setupLogging configures logging to write to a file in the same directory as the binary
-func setupLogging(stdioMode bool) (*os.File, error) {
-	// Get the directory where the binary is located
-	execPath, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get executable path: %w", err)
-	}
-	binDir := filepath.Dir(execPath)
-
-	// Create log file with timestamp
-	timestamp := time.Now().Format("20060102")
-	logPath := filepath.Join(binDir, fmt.Sprintf("rh-issues-mcp-%s.log", timestamp))
-
-	// Open log file (append mode)
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open log file: %w", err)
-	}
-
-	// In stdio mode, log only to file (stdout/stderr must be clean for MCP protocol)
-	// In HTTP mode, log to both file and stderr
-	if stdioMode {
-		log.SetOutput(logFile)
-	} else {
-		multiWriter := io.MultiWriter(os.Stderr, logFile)
-		log.SetOutput(multiWriter)
-	}
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-
-	log.Printf("=== Red Hat JIRA Issues MCP Server Started ===")
-	log.Printf("Log file: %s", logPath)
-
-	return logFile, nil
-}
 
 func main() {
 	flag.Usage = func() {
@@ -65,12 +35,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "2. Get Issue Details by Key\n\n")
 		fmt.Fprintf(os.Stderr, "Environment Variables:\n")
 		fmt.Fprintf(os.Stderr, "  RH_JIRA_EMAIL - Atlassian account email (required)\n")
-		fmt.Fprintf(os.Stderr, "  RH_JIRA_TOKEN - Atlassian API token (required)\n\n")
+		fmt.Fprintf(os.Stderr, "  RH_JIRA_TOKEN - Atlassian API token (required)\n")
+		fmt.Fprintf(os.Stderr, "  LOG_LEVEL     - debug, info, warn (default), or error\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  Run over stdio:     %s\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  Run HTTP server:    %s -http :8081\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  Run HTTP server:    %s -http localhost:8081\n", os.Args[0])
 	}
 	flag.Parse()
 
@@ -79,60 +50,83 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Determine if we're running in stdio mode
-	stdioMode := *httpAddr == ""
+	// Logging is rotated (size-based, compressed, old backups pruned) and
+	// quiet by default: only warnings and errors unless -v or LOG_LEVEL.
+	// stdio mode logs to the file only; HTTP mode mirrors to stderr.
+	logPath, closeLog := logging.Init(logging.Options{
+		Service: service,
+		Dir:     *logDir,
+		Verbose: *verbose,
+		Stderr:  *httpAddr != "",
+	})
+	defer closeLog()
 
-	// Setup logging
-	logFile, err := setupLogging(stdioMode)
-	if err != nil {
-		log.Fatalf("Failed to setup logging: %v", err)
-	}
-	defer logFile.Close()
-
-	// Check for required environment variable
 	if os.Getenv("RH_JIRA_TOKEN") == "" {
-		log.Fatal("RH_JIRA_TOKEN environment variable is required")
+		logging.Errorf("%s: RH_JIRA_TOKEN environment variable is required", service)
+		os.Exit(1)
 	}
 	if os.Getenv("RH_JIRA_EMAIL") == "" {
-		log.Fatal("RH_JIRA_EMAIL environment variable is required")
+		logging.Errorf("%s: RH_JIRA_EMAIL environment variable is required", service)
+		os.Exit(1)
 	}
-	log.Println("Jira Cloud credentials found")
 
-	// Create the MCP server
 	mcpServer, err := server.NewRedHatIssuesServer()
 	if err != nil {
-		log.Fatalf("Failed to create server: %v", err)
+		logging.Errorf("%s: failed to create server: %v", service, err)
+		os.Exit(1)
 	}
-	log.Println("Red Hat JIRA Issues MCP server initialized successfully")
 
 	ctx := context.Background()
 
 	if *httpAddr != "" {
-		// Run as HTTP server
-		log.Printf("Starting HTTP server mode on %s", *httpAddr)
-		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-			return mcpServer
-		}, nil)
-
-		log.Printf("Red Hat JIRA Issues MCP server listening on %s", *httpAddr)
-		log.Println("Available tools:")
-		log.Println("  - search_issues: Search for Red Hat JIRA issues using JQL")
-		log.Println("  - get_issue: Get detailed information about a specific JIRA issue")
-
-		if err := http.ListenAndServe(*httpAddr, handler); err != nil {
-			log.Fatalf("HTTP server failed: %v", err)
+		if err := serveHTTP(ctx, *httpAddr, mcpServer, logPath); err != nil {
+			logging.Errorf("%s: HTTP server failed: %v", service, err)
+			os.Exit(1)
 		}
-	} else {
-		// Run over stdio
-		log.Println("Starting stdio mode...")
-		log.Println("Available tools:")
-		log.Println("  - search_issues: Search for Red Hat JIRA issues using JQL")
-		log.Println("  - get_issue: Get detailed information about a specific JIRA issue")
-
-		if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
-			log.Fatalf("Server failed: %v", err)
-		}
+		return
 	}
 
-	log.Println("=== Red Hat JIRA Issues MCP Server Stopped ===")
+	logging.Infof("%s: starting stdio mode (log: %s)", service, logPath)
+	if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
+		logging.Errorf("%s: server failed: %v", service, err)
+		os.Exit(1)
+	}
+}
+
+// serveHTTP runs the Streamable HTTP transport with bounded timeouts and
+// graceful shutdown on SIGINT/SIGTERM. It returns nil on a clean shutdown.
+func serveHTTP(ctx context.Context, addr string, mcpServer *mcp.Server, logPath string) error {
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return mcpServer
+	}, nil)
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+		// Bound timeouts so slow or idle clients cannot hold connections
+		// forever. WriteTimeout must exceed any long-poll window the MCP
+		// client uses.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+
+	shutdown := make(chan error, 1)
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		sig := <-sigCh
+		logging.Infof("%s: %v received, shutting down", service, sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		shutdown <- srv.Shutdown(ctx)
+	}()
+
+	logging.Infof("%s: listening on http://%s (tools: search_issues, get_issue; log: %s)", service, addr, logPath)
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return <-shutdown
+	}
+	return err
 }

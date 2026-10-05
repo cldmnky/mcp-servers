@@ -26,7 +26,7 @@ export RH_JIRA_TOKEN="your_atlassian_api_token"
 ./bin/rh-issues-mcp -help
 ```
 
-HTTP mode has no client authentication; keep it on localhost or secure it with an authenticated proxy. Logs are written next to the binary.
+HTTP mode has no client authentication; keep it on localhost or secure it with an authenticated proxy. Logs are quiet by default (warnings and errors only); `-v` or `LOG_LEVEL=debug` enables per-request detail. The log file (`rh-issues-mcp.log`) is size-rotated, written beside the binary unless `-log-dir` is set, and mirrored to stderr in HTTP mode. The HTTP listener applies connection timeouts and shuts down gracefully on SIGINT/SIGTERM.
 
 ## Tools
 

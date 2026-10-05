@@ -3,11 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
 	jira "github.com/andygrunwald/go-jira/v2/cloud"
+
+	"github.com/cldmnky/mcp-servers/internal/logging"
 )
 
 const jiraBaseURL = "https://redhat.atlassian.net"
@@ -45,28 +46,27 @@ func NewJiraAPI() (*JiraAPI, error) {
 
 // SearchIssues searches for JIRA issues using JQL
 func (j *JiraAPI) SearchIssues(ctx context.Context, jql string, opts *jira.SearchOptionsV2) ([]jira.Issue, *jira.Response, error) {
-	log.Printf("[api] Searching issues with JQL: %q", jql)
+	logging.Debugf("[api] searching issues with JQL: %q", jql)
 
 	issues, resp, err := j.client.Issue.SearchV2JQL(ctx, jql, opts)
 	if err != nil {
-		log.Printf("[api] ERROR: Search failed: %v", err)
+		logging.Errorf("[api] search failed: %v", err)
 		return nil, nil, fmt.Errorf("JIRA search failed: %w", err)
 	}
 
-	log.Printf("[api] Search completed successfully, found %d issues (last page: %t)", len(issues), resp.IsLast)
+	logging.Debugf("[api] search found %d issues (last page: %t)", len(issues), resp.IsLast)
 	return issues, resp, nil
 }
 
 // GetIssue retrieves a single JIRA issue by key
 func (j *JiraAPI) GetIssue(ctx context.Context, issueKey string) (*jira.Issue, error) {
-	log.Printf("[api] Getting issue: %s", issueKey)
+	logging.Debugf("[api] getting issue: %s", issueKey)
 
 	issue, _, err := j.client.Issue.Get(ctx, issueKey, nil)
 	if err != nil {
-		log.Printf("[api] ERROR: Failed to get issue %s: %v", issueKey, err)
+		logging.Errorf("[api] failed to get issue %s: %v", issueKey, err)
 		return nil, fmt.Errorf("failed to get JIRA issue: %w", err)
 	}
 
-	log.Printf("[api] Successfully retrieved issue: %s", issueKey)
 	return issue, nil
 }

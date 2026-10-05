@@ -33,7 +33,7 @@ Set the required token in your environment, then launch the corresponding binary
 ./bin/rhkcs-mcp -http localhost:8080
 ```
 
-Use `-help` for CLI options. Logs are written next to the binaries; HTTP mode also logs to stderr. HTTP listeners do not provide client authentication, so bind to localhost or secure access with an authenticated proxy.
+Use `-help` for CLI options. Logs are quiet by default (warnings and errors only); use `-v` or `LOG_LEVEL=debug` for per-request detail. The log file (`rh-issues-mcp.log`) is size-rotated and written beside the binary unless `-log-dir` is set. HTTP mode also mirrors logs to stderr, applies connection timeouts, and shuts down gracefully on SIGINT/SIGTERM. HTTP listeners do not provide client authentication, so bind to localhost or secure access with an authenticated proxy.
 
 See the [JIRA server documentation](pkg/mcp/rh-issues-mcp/README.md) and [KCS server documentation](pkg/mcp/rhkcs-mcp/README.md) for tool parameters and MCP client configuration. Keep tokens out of committed configuration files.
 
