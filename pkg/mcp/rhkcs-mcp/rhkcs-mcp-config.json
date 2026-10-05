@@ -1,0 +1,18 @@
+{
+  "description": "Example MCP client configuration for Red Hat KCS Server",
+  "mcpServers": {
+    "redhat-kcs": {
+      "command": "/path/to/mcp-servers/bin/rhkcs-mcp",
+      "env": {
+        "RH_API_OFFLINE_TOKEN": "your_offline_token_here"
+      },
+      "description": "Red Hat Knowledge Centered Service and Support Case access"
+    }
+  },
+  "httpServers": {
+    "redhat-kcs-http": {
+      "url": "http://localhost:8080",
+      "description": "Red Hat KCS Server via HTTP (if running with -http :8080)"
+    }
+  }
+}
