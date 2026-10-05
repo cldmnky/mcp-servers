@@ -44,6 +44,7 @@ make format
 make test
 make vet
 make clean # Remove the two built binaries (preserves logs)
+make install # Build both servers and copy them to ~/bin (override with INSTALL_DIR=...)
 ```
 
 Licensed under [Apache-2.0](LICENSE).

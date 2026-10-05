@@ -1,7 +1,9 @@
 GO ?= go
 
 .DEFAULT_GOAL := build
-.PHONY: build build-issues-mcp build-mcp format test vet clean run-mcp run-mcp-http
+.PHONY: build build-issues-mcp build-mcp format test vet clean run-mcp run-mcp-http install
+
+INSTALL_DIR ?= $(HOME)/bin
 
 build: build-issues-mcp build-mcp
 
@@ -27,6 +29,10 @@ run-mcp: build-mcp
 
 run-mcp-http: build-mcp
 	./bin/rhkcs-mcp -http :8080
+
+install: build
+	mkdir -p $(INSTALL_DIR)
+	install -m 0755 bin/rh-issues-mcp bin/rhkcs-mcp $(INSTALL_DIR)/
 
 clean:
 	rm -f bin/rh-issues-mcp bin/rhkcs-mcp

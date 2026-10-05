@@ -21,9 +21,9 @@ func initGlobalAPI() error {
 
 // Search KCS tool parameters
 type SearchKCSParams struct {
-	Query string `json:"query" jsonschema:"Search query string"`
-	Rows  int    `json:"rows,omitempty" jsonschema:"Number of results to return (default: 10)"`
-	Start int    `json:"start,omitempty" jsonschema:"Starting index for pagination (default: 0)"`
+	Query string `json:"query" jsonschema:"Search terms for the Red Hat knowledge base; Solr-style keywords and quoted phrases, e.g. 'ovnkube crashloop' or '\"etcd leader election\" timeout'"`
+	Rows  int    `json:"rows,omitempty" jsonschema:"Page size; defaults to 10"`
+	Start int    `json:"start,omitempty" jsonschema:"Offset of the first result for pagination; defaults to 0"`
 	// SessionID is accepted for backwards compatibility with clients
 	// configured against older versions of this server; it is ignored.
 	SessionID string `json:"session_id,omitempty" jsonschema:"Deprecated: accepted for backwards compatibility and ignored"`
@@ -182,7 +182,7 @@ func parseKCSSolutions(result map[string]interface{}) []KCSSolution {
 
 // Get KCS tool parameters
 type GetKCSParams struct {
-	SolutionID string `json:"solution_id" jsonschema:"The ID of the solution to retrieve"`
+	SolutionID string `json:"solution_id" jsonschema:"Numeric KCS solution ID from a search_kcs result, e.g. 7010411"`
 	// SessionID is accepted for backwards compatibility with clients
 	// configured against older versions of this server; it is ignored.
 	SessionID string `json:"session_id,omitempty" jsonschema:"Deprecated: accepted for backwards compatibility and ignored"`
@@ -301,15 +301,35 @@ func NewRedHatKCSServer() (*mcp.Server, error) {
 
 	// Add search KCS tool
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "search_kcs",
-		Description: "**ALWAYS USE THIS FIRST** when the user asks to search for, find, or look up Red Hat KCS (Knowledge Centered Service) articles, solutions, or knowledge base content. This tool searches the official Red Hat Customer Portal knowledge base and returns real KCS article IDs with titles, scores, and URLs. Use this instead of making up fake KCS IDs or searching the general web for KCS content.",
+		Name: "search_kcs",
+		Description: "Search the official Red Hat Customer Portal knowledge base (KCS) for solutions and articles, and get their real numeric IDs, titles, relevance scores, and access.redhat.com URLs.\n\n" +
+			"Use for Red Hat product troubleshooting, configuration how-tos, and error lookups (OpenShift, RHEL, Ansible, etc.). Use plain keywords or quoted phrases; simple topical queries work better than long natural-language sentences.\n\n" +
+			"Results are the authoritative solution IDs — do not guess or fabricate IDs; pass them to get_kcs for the full article. For Red Hat Jira engineering issues, use search_issues instead.",
+		Annotations: &mcp.ToolAnnotations{
+			Title:           "Search Red Hat KCS solutions",
+			ReadOnlyHint:    true,
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(true),
+		},
 	}, searchKCS)
 
 	// Add get KCS tool
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_kcs",
-		Description: "Retrieve the full detailed content of a specific Red Hat KCS solution by its ID (obtained from search_kcs results). Returns structured information including Title, Environment, Issue description, Resolution steps, and Root Cause analysis. Always use search_kcs first to get valid solution IDs before calling this tool.",
+		Name: "get_kcs",
+		Description: "Retrieve the full content of one Red Hat KCS solution by its numeric ID (e.g. 7010411), returning title, affected environment, issue description, resolution steps, root cause, and the access.redhat.com URL.\n\n" +
+			"Use when the solution ID is known — from a search_kcs result, a Jira issue, or the user. Without an ID, call search_kcs first; arbitrary numbers will not resolve.",
+		Annotations: &mcp.ToolAnnotations{
+			Title:           "Get Red Hat KCS solution details",
+			ReadOnlyHint:    true,
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(true),
+		},
 	}, getKCS)
 
 	return server, nil
 }
+
+// boolPtr is a small helper for the pointer-valued tool annotation fields.
+func boolPtr(b bool) *bool { return &b }

@@ -68,6 +68,41 @@ curl --user "$RH_JIRA_EMAIL:$RH_JIRA_TOKEN" \
 
 Configure the client to launch `/absolute/path/to/mcp-servers/bin/rh-issues-mcp` and pass `RH_JIRA_EMAIL` and `RH_JIRA_TOKEN` through its environment. Both `search_issues` and `get_issue` are registered over stdio and HTTP.
 
+OpenCode (`opencode.json`, global or project):
+
+```json
+{
+  "mcp": {
+    "rh-issues": {
+      "type": "local",
+      "command": ["/absolute/path/to/bin/rh-issues-mcp"],
+      "environment": {
+        "RH_JIRA_EMAIL": "{env:RH_JIRA_EMAIL}",
+        "RH_JIRA_TOKEN": "{env:RH_JIRA_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+pi (`~/.pi/agent/mcp.json`, or `pi mcp add rh-issues --env RH_JIRA_EMAIL=... --env RH_JIRA_TOKEN=... -- /absolute/path/to/bin/rh-issues-mcp`):
+
+```json
+{
+  "mcpServers": {
+    "rh-issues": {
+      "command": "/absolute/path/to/bin/rh-issues-mcp",
+      "env": {
+        "RH_JIRA_EMAIL": "${RH_JIRA_EMAIL}",
+        "RH_JIRA_TOKEN": "${RH_JIRA_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Both clients can reference secrets from the environment (shown above) instead of inlining tokens.
+
 ## Development
 
 ```sh

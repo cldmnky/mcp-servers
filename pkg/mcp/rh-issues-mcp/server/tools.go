@@ -24,9 +24,9 @@ func initGlobalAPI() error {
 
 // Search Issues tool parameters
 type SearchIssuesParams struct {
-	Query         string `json:"query" jsonschema:"Search query - can be either JQL (JIRA Query Language) or natural language text. For natural language, the tool will automatically construct an appropriate JQL query."`
-	MaxResults    int    `json:"max_results,omitempty" jsonschema:"Maximum number of results to return (default: 50)"`
-	NextPageToken string `json:"next_page_token,omitempty" jsonschema:"Continuation token from a previous search response; omit for the first page"`
+	Query         string `json:"query" jsonschema:"Search terms or a JQL expression. JQL is detected and passed through when it contains operators like 'project =' or '~'; free text is wrapped in a full-text search. Examples: 'project = OCPBUGS AND text ~ \"GPU passthrough\"' or 'ovnkube crashloop'"`
+	MaxResults    int    `json:"max_results,omitempty" jsonschema:"Page size, 1-100; defaults to 50. Keep modest to limit response size"`
+	NextPageToken string `json:"next_page_token,omitempty" jsonschema:"Continuation token returned by a previous search_issues call. Omit on the first page and reuse the exact same query when paginating"`
 }
 
 // JIRA Issue response
@@ -102,6 +102,10 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 	if params.MaxResults == 0 {
 		params.MaxResults = 50
 	}
+	// Jira Cloud enhanced search caps page size at 100.
+	if params.MaxResults > 100 {
+		params.MaxResults = 100
+	}
 
 	// Convert query to JQL if needed
 	jqlQuery := buildJQLQuery(params.Query)
@@ -176,7 +180,7 @@ func searchIssues(ctx context.Context, req *mcp.CallToolRequest, params SearchIs
 
 // Get Issue tool parameters
 type GetIssueParams struct {
-	IssueKey string `json:"issue_key" jsonschema:"The JIRA issue key (e.g., OCPBUGS-12345)"`
+	IssueKey string `json:"issue_key" jsonschema:"Jira issue key in PROJECT-NUMBER form, e.g. OCPBUGS-55179"`
 }
 
 // JIRA Issue details
@@ -263,15 +267,38 @@ func NewRedHatIssuesServer() (*mcp.Server, error) {
 
 	// Add search issues tool
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "search_issues",
-		Description: "Search Red Hat JIRA issues using either natural language or JQL (JIRA Query Language). You can provide simple text like 'GPU passthrough errors' or 'KubeVirt networking issues', and the tool will automatically convert it to proper JQL. Alternatively, you can use explicit JQL queries like 'project = OCPBUGS AND summary ~ \"DNS\"' or 'key = OCPBUGS-55179'. Returns issue keys, summaries, status, and priority. Requires RH_JIRA_EMAIL and RH_JIRA_TOKEN to be set. Use next_page_token from the response to fetch the next page.",
+		Name: "search_issues",
+		Description: "Search Red Hat Jira Cloud issues (https://redhat.atlassian.net), covering engineering bugs, features, and escalations in projects such as OCPBUGS, OCPENG, and OCPTRL.\n\n" +
+			"Input handling: if the query contains JQL operators (project =, status IN, ~, AND, OR), it is sent as-is; anything else is wrapped in a `text ~ \"...\"` full-text search across summary, description, comments, and environment. Prefer explicit JQL to filter precisely; use plain text only for broad topical searches.\n\n" +
+			"Examples: `project = OCPBUGS AND text ~ \"GPU passthrough\"` (JQL) or `ovnkube crashloop after node reboot` (plain text).\n\n" +
+			"Returns one page of issues with key, summary, status, priority, and a browse URL. Pagination is token-based: pass `next_page_token` from the response with the same query to fetch more; `is_last` marks the end. No exact total is available from the API. Typical page sizes fit well under the default of 50.\n\n" +
+			"Use get_issue to retrieve the full description of a result. For Red Hat knowledge-base articles, use search_kcs instead.",
+		Annotations: &mcp.ToolAnnotations{
+			Title:           "Search Red Hat Jira issues",
+			ReadOnlyHint:    true,
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(true),
+		},
 	}, searchIssues)
 
 	// Add get issue tool
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_issue",
-		Description: "Retrieve the full details of a specific Red Hat JIRA issue by its key (e.g., OCPBUGS-55179). Returns structured information including Key, Summary, Description, Status, Priority, Created date, and Updated date. Use search_issues first if you need to find issue keys, or use this directly if you already know the issue key from a KCS article or other source.",
+		Name: "get_issue",
+		Description: "Retrieve the full record of one Red Hat Jira Cloud issue by its key, e.g. OCPBUGS-55179 or OCPENG-1234.\n\n" +
+			"Use when the key is already known — from search_issues results, a KCS article cross-reference, or the user. If you only have a topic or symptom, call search_issues first instead of guessing keys.\n\n" +
+			"Returns key, summary, full description text, status, priority, created/updated timestamps, and the https://redhat.atlassian.net/browse/{key} URL.",
+		Annotations: &mcp.ToolAnnotations{
+			Title:           "Get Red Hat Jira issue details",
+			ReadOnlyHint:    true,
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(true),
+		},
 	}, getIssue)
 
 	return server, nil
 }
+
+// boolPtr is a small helper for the pointer-valued tool annotation fields.
+func boolPtr(b bool) *bool { return &b }

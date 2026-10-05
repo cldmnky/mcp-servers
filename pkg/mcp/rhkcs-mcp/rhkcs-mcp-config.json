@@ -1,18 +1,46 @@
 {
-  "description": "Example MCP client configuration for Red Hat KCS Server",
-  "mcpServers": {
-    "redhat-kcs": {
-      "command": "/path/to/mcp-servers/bin/rhkcs-mcp",
-      "env": {
-        "RH_API_OFFLINE_TOKEN": "your_offline_token_here"
-      },
-      "description": "Red Hat Knowledge Centered Service and Support Case access"
+  "description": "Example MCP client configurations for the Red Hat KCS Server. Use absolute paths to the built binary and reference tokens from the environment where the client supports it.",
+  "opencode": {
+    "opencode.json": {
+      "mcp": {
+        "rhkcs": {
+          "type": "local",
+          "command": ["/absolute/path/to/mcp-servers/bin/rhkcs-mcp"],
+          "environment": {
+            "RH_API_OFFLINE_TOKEN": "{env:RH_API_OFFLINE_TOKEN}"
+          }
+        }
+      }
+    }
+  },
+  "pi": {
+    "~/.pi/agent/mcp.json": {
+      "mcpServers": {
+        "rhkcs": {
+          "command": "/absolute/path/to/mcp-servers/bin/rhkcs-mcp",
+          "env": {
+            "RH_API_OFFLINE_TOKEN": "${RH_API_OFFLINE_TOKEN}"
+          }
+        }
+      }
+    },
+    "cli": "pi mcp add rhkcs --env RH_API_OFFLINE_TOKEN=... -- /absolute/path/to/mcp-servers/bin/rhkcs-mcp"
+  },
+  "claude-desktop": {
+    "mcpServers": {
+      "redhat-kcs": {
+        "command": "/absolute/path/to/mcp-servers/bin/rhkcs-mcp",
+        "env": {
+          "RH_API_OFFLINE_TOKEN": "your_offline_token_here"
+        },
+        "description": "Red Hat Knowledge Centered Service and Support Case access"
+      }
     }
   },
   "httpServers": {
     "redhat-kcs-http": {
       "url": "http://localhost:8080",
-      "description": "Red Hat KCS Server via HTTP (if running with -http :8080)"
+      "description": "Red Hat KCS Server via HTTP (if running with -http localhost:8080)"
     }
   }
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/cldmnky/mcp-servers/internal/logging"
+	"github.com/cldmnky/mcp-servers/internal/setuphelp"
 	"github.com/cldmnky/mcp-servers/pkg/mcp/rh-issues-mcp/server"
 )
 
@@ -36,7 +37,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Environment Variables:\n")
 		fmt.Fprintf(os.Stderr, "  RH_JIRA_EMAIL - Atlassian account email (required)\n")
 		fmt.Fprintf(os.Stderr, "  RH_JIRA_TOKEN - Atlassian API token (required)\n")
-		fmt.Fprintf(os.Stderr, "  LOG_LEVEL     - debug, info, warn (default), or error\n\n")
+		fmt.Fprintf(os.Stderr, "  LOG_LEVEL     - debug, info, warn (default), or error\n")
+		setuphelp.Write(os.Stderr, "rh-issues", service, []setuphelp.EnvVar{
+			{Name: "RH_JIRA_EMAIL", Placeholder: "you@example.com"},
+			{Name: "RH_JIRA_TOKEN", Placeholder: "your_atlassian_api_token"},
+		})
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")

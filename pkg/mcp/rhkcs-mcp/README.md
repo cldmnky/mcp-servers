@@ -113,6 +113,42 @@ Add this configuration to your Claude Desktop MCP settings:
 }
 ```
 
+### Example Usage with OpenCode
+
+Add to `opencode.json` (global or project):
+
+```json
+{
+  "mcp": {
+    "rhkcs": {
+      "type": "local",
+      "command": ["/absolute/path/to/bin/rhkcs-mcp"],
+      "environment": {
+        "RH_API_OFFLINE_TOKEN": "{env:RH_API_OFFLINE_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+### Example Usage with pi
+
+Add to `~/.pi/agent/mcp.json`, or run
+`pi mcp add rhkcs --env RH_API_OFFLINE_TOKEN=... -- /absolute/path/to/bin/rhkcs-mcp`:
+
+```json
+{
+  "mcpServers": {
+    "rhkcs": {
+      "command": "/absolute/path/to/bin/rhkcs-mcp",
+      "env": {
+        "RH_API_OFFLINE_TOKEN": "${RH_API_OFFLINE_TOKEN}"
+      }
+    }
+  }
+}
+```
+
 ## API Integration
 
 This server integrates with the Red Hat KCS Search API:

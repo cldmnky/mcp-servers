@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/cldmnky/mcp-servers/internal/logging"
+	"github.com/cldmnky/mcp-servers/internal/setuphelp"
 	"github.com/cldmnky/mcp-servers/pkg/mcp/rhkcs-mcp/server"
 )
 
@@ -35,7 +36,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "2. Get a Solution by ID\n\n")
 		fmt.Fprintf(os.Stderr, "Environment Variables:\n")
 		fmt.Fprintf(os.Stderr, "  RH_API_OFFLINE_TOKEN - Red Hat API offline token (required)\n")
-		fmt.Fprintf(os.Stderr, "  LOG_LEVEL            - debug, info, warn (default), or error\n\n")
+		fmt.Fprintf(os.Stderr, "  LOG_LEVEL            - debug, info, warn (default), or error\n")
+		setuphelp.Write(os.Stderr, "rhkcs", service, []setuphelp.EnvVar{
+			{Name: "RH_API_OFFLINE_TOKEN", Placeholder: "your_offline_token"},
+		})
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")

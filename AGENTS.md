@@ -4,12 +4,15 @@
 - Use Go 1.24.6+; this is one module with two standalone binaries, not the original `ocp-agent` workspace.
 - Run commands from the root: `make` builds both binaries into ignored `bin/`; `make build-issues-mcp` builds Jira, while `make build-mcp` builds **KCS only**.
 - Checks: `make format` (`go fmt ./...`), `make test` (`go test ./...`), `make vet` (`go vet ./...`). Root `go build` has no Go package; use the Make targets.
+- `make install` builds both binaries and copies them to `~/bin` (`INSTALL_DIR` overridable). Note a live `rhkcs-mcp` may run from `~/bin` — reinstalling replaces the file but not the running process.
 - Focused tests: `go test ./pkg/mcp/rh-issues-mcp/server -run '^TestCloudAPI$' -count=1`; package scope `go test ./pkg/mcp/rh-issues-mcp/...` (or `rhkcs-mcp/...`). Add `-race` to exercise the KCS token-refresh lock.
 - All tests use `httptest` with dummy credentials; no external service or real tokens needed.
 
 ## Wiring and API contracts
 - Each `pkg/mcp/{rh-issues-mcp,rhkcs-mcp}/main.go` owns CLI flags, logging init, transports, and HTTP timeouts/graceful shutdown. Its `server/tools.go` constructs the MCP server, initializes a package-global API client, and registers tools; `server/api.go` owns upstream requests/authentication.
-- Tool parameter/result structs and their `json`/`jsonschema` tags define SDK-inferred schemas via `mcp.AddTool`. The SDK generates `additionalProperties: false` — removing a param field breaks existing clients that still send it. Keep removed-behavior params (e.g. KCS `session_id`) in the struct with a "Deprecated ... ignored" description instead of deleting them.
+- Tool parameter/result structs and their `json`/`jsonschema` tags define SDK-inferred schemas via `mcp.AddTool`. The SDK generates `additionalProperties: false` — removing a param field breaks existing clients that still send it. Keep removed-behavior params (e.g. KCS `session_id`) in the struct with a "Deprecated ... ignored" description instead of deleting them. Struct tags support descriptions only (no min/pattern constraints); enforce bounds in handler code so descriptions stay truthful (e.g. `max_results` is clamped to 100).
+- Tool descriptions follow Anthropic's guidance (purpose, when to use/not use, limitations, examples, sibling disambiguation) and every tool sets `Annotations` (`Title`, `ReadOnlyHint`, `IdempotentHint`, `DestructiveHint: false`, `OpenWorldHint`). Avoid behavioral instructions like "ALWAYS USE THIS FIRST" — Anthropic directory review rejects them as prompt injection.
+- `-help` prints OpenCode and pi client setup snippets from `internal/setuphelp`; update that package when config formats change, not the two mains.
 - Handlers return both text content and typed structured results. Keep both representations aligned when changing output. Empty `issues`/array results must stay `[]`, not `null`, to satisfy the MCP array schema (see `TestSearchIssuesEmptyResultsAreArray`).
 - Jira uses `github.com/andygrunwald/go-jira/v2/cloud` against `https://redhat.atlassian.net`: email/API-token Basic auth, not legacy PATs or OAuth gateway tokens. Preserve REST v2 for string descriptions and `/rest/api/2/search/jql` (`SearchV2JQL`), not retired `/search`.
 - Jira pagination is `next_page_token`/`is_last`, not offsets or totals.
