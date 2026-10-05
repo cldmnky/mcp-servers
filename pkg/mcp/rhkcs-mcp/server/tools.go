@@ -200,7 +200,9 @@ type GetKCSParams struct {
 // KCS Solution details
 type KCSDetails struct {
 	Title       string `json:"title"`
+	Kind        string `json:"kind,omitempty" jsonschema:"Document kind: Solution or Article"`
 	Environment string `json:"environment"`
+	Abstract    string `json:"abstract,omitempty" jsonschema:"Article abstract; Solutions usually have no abstract"`
 	Issue       string `json:"issue"`
 	Resolution  string `json:"resolution"`
 	RootCause   string `json:"root_cause"`
@@ -222,11 +224,12 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 	}
 
 	// Use the KCS search API with an ID query to get the full solution.
-	// The search API supports field selection through the 'expression' parameter.
+	// Solutions carry issue/resolution/root-cause fields; Articles carry an
+	// abstract instead, so request both shapes.
 	requestData := map[string]interface{}{
 		"clientName": "mcp",
 		"q":          fmt.Sprintf("id:%s", params.SolutionID),
-		"expression": "fl=publishedTitle,allTitle,standard_product,issue,solution_resolution,solution_rootcause,view_uri,id",
+		"expression": "fl=publishedTitle,allTitle,standard_product,issue,solution_resolution,solution_rootcause,view_uri,id,documentKind,abstract",
 	}
 
 	logging.Debugf("[get_kcs] solution ID: %s", params.SolutionID)
@@ -250,7 +253,11 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 				} else if title, ok := doc["allTitle"].(string); ok {
 					details.Title = title
 				}
+				if kind, ok := doc["documentKind"].(string); ok {
+					details.Kind = kind
+				}
 				details.Environment = firstString(doc["standard_product"])
+				details.Abstract = firstString(doc["abstract"])
 				details.Issue = reflowMarkdown(firstString(doc["issue"]))
 				details.Resolution = reflowMarkdown(firstString(doc["solution_resolution"]))
 				details.RootCause = reflowMarkdown(firstString(doc["solution_rootcause"]))
@@ -270,6 +277,9 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 	if details.Environment != "" {
 		responseText += fmt.Sprintf("**Environment:** %s\n\n", details.Environment)
 	}
+	if details.Abstract != "" {
+		responseText += fmt.Sprintf("**Abstract:**\n%s\n\n", details.Abstract)
+	}
 	if details.Issue != "" {
 		responseText += fmt.Sprintf("**Issue:**\n%s\n\n", details.Issue)
 	}
@@ -278,6 +288,19 @@ func getKCS(ctx context.Context, req *mcp.CallToolRequest, params GetKCSParams) 
 	}
 	if details.RootCause != "" {
 		responseText += fmt.Sprintf("**Root Cause:**\n%s\n", details.RootCause)
+	}
+
+	// Some documents (e.g. draft or restricted Articles) have no body in the
+	// search index. Say so explicitly instead of returning metadata only.
+	if details.Abstract == "" && details.Issue == "" && details.Resolution == "" && details.RootCause == "" {
+		responseText += "\n_No body content is available in the search index for this document (it may be a draft, restricted, or subscriber-only); consult the link above._\n"
+	}
+
+	// The index strips line breaks — and sometimes the spaces around them —
+	// inside code fences, so fenced commands may be mangled. Warn against
+	// executing them verbatim.
+	if fencedCodePresent(details.Issue) || fencedCodePresent(details.Resolution) || fencedCodePresent(details.RootCause) {
+		responseText += "\n_Note: the source index strips line breaks (and occasionally spaces) inside code blocks. Treat fenced commands as reference and reconstruct them before executing._\n"
 	}
 
 	return &mcp.CallToolResult{
@@ -307,13 +330,17 @@ func firstString(v interface{}) string {
 
 // reflowMarkdown restores the line structure that the search API flattens
 // out of stored text fields: the Solr index collapses newlines, so headings,
-// list items, and code fences arrive glued into a single line. Breaking
-// before Markdown block markers makes articles readable again without
-// changing their content.
+// list items, and code fences arrive glued into a single line.
+//
+// Prose is re-broken before Markdown block markers. Fenced code blocks are
+// left byte-for-byte untouched — the index also eats spaces where line
+// breaks used to be (e.g. "oc get nodes-o jsonpath"), so any attempt to
+// re-wrap commands risks corrupting them further. Callers should warn that
+// fenced commands may be mangled (see fencedCodePresent).
 var (
-	reflowFence   = regexp.MustCompile(`\s*(~{3,}|` + "`{3,}" + `)`)
+	fenceSplit    = regexp.MustCompile("(`{3,}|~{3,})")
 	reflowHeading = regexp.MustCompile(`\s*(#{1,6}\s)`)
-	reflowBullet  = regexp.MustCompile(`([^\s])- `)
+	reflowBullet  = regexp.MustCompile(`([^\s-])- `)
 	reflowOrdered = regexp.MustCompile(`([^\d\s])\s*(\d{1,2}\. )`)
 	reflowSqueeze = regexp.MustCompile(`\n{3,}`)
 )
@@ -325,12 +352,41 @@ func reflowMarkdown(s string) string {
 	if s == "" || strings.Contains(s, "\n") {
 		return s
 	}
-	s = reflowFence.ReplaceAllString(s, "\n\n$1")
+
+	parts := fenceSplit.Split(s, -1)           // alternating prose / code segments
+	markers := fenceSplit.FindAllString(s, -1) // fences[i] sits between parts[i] and parts[i+1]
+
+	var b strings.Builder
+	for i, part := range parts {
+		if i%2 == 0 { // prose
+			if p := reflowProse(part); p != "" {
+				b.WriteString(p)
+				b.WriteString("\n\n")
+			}
+		} else { // fenced code: verbatim
+			b.WriteString(markers[i-1]) // opening fence
+			b.WriteString("\n")
+			b.WriteString(strings.TrimSpace(part))
+			b.WriteString("\n")
+			b.WriteString(markers[i]) // closing fence
+			b.WriteString("\n\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func reflowProse(s string) string {
 	s = reflowHeading.ReplaceAllString(s, "\n\n$1")
 	s = reflowBullet.ReplaceAllString(s, "$1\n- ")
 	s = reflowOrdered.ReplaceAllString(s, "$1\n$2")
 	s = reflowSqueeze.ReplaceAllString(s, "\n\n")
 	return strings.TrimSpace(s)
+}
+
+// fencedCodePresent reports whether any Markdown code fence occurs in s,
+// used to warn that the index may have mangled commands inside them.
+func fencedCodePresent(s string) bool {
+	return fenceSplit.MatchString(s)
 }
 
 // NewRedHatKCSServer creates a new MCP server with Red Hat KCS tools
@@ -364,7 +420,7 @@ func NewRedHatKCSServer() (*mcp.Server, error) {
 	// Add get KCS tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_kcs",
-		Description: "Retrieve the full content of one Red Hat KCS solution by its numeric ID (e.g. 7010411), returning title, affected environment, issue description, resolution steps, root cause, and the access.redhat.com URL. Long text fields are re-formatted with restored line breaks for readability.\n\n" +
+		Description: "Retrieve the full content of one Red Hat KCS solution by its numeric ID (e.g. 7010411), returning title, affected environment, issue description, resolution steps, root cause, and the access.redhat.com URL. Solutions carry issue/resolution/root-cause sections; Articles carry an abstract. Long text fields are re-formatted with restored line breaks for readability, and a warning is included when code blocks may have lost line breaks in the source index — do not execute fenced commands verbatim.\n\n" +
 			"Use when the solution ID is known — from a search_kcs result, a Jira issue, or the user. `solution_id` must be purely numeric: documentation URLs and other identifiers are rejected; call search_kcs to find numeric Solution or Article IDs.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "Get Red Hat KCS solution details",

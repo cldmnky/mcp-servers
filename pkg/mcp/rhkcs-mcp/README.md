@@ -29,10 +29,10 @@ Get a specific solution by ID and extract structured content with title, Environ
 - `session_id` (string, optional): Deprecated; accepted for backwards compatibility and ignored.
 
 **Returns:**
-- Detailed solution with title, environment, issue, resolution, and root cause
+- Detailed solution with title, kind, environment, abstract (Articles), issue, resolution, and root cause. Articles carry an `abstract` instead of solution fields; documents with no body in the index (drafts, restricted) say so explicitly in the response.
 
 **Formatting:**
-The search index flattens line breaks out of stored text, so articles arrive as single lines. The server re-inserts line breaks around Markdown block elements (headings, list items, numbered steps, code fences) to restore readable structure; inline constructs such as links, `--flags`, and version numbers are left untouched.
+The search index flattens line breaks out of stored text, so articles arrive as single lines. The server re-inserts line breaks around Markdown block elements (headings, list items, numbered steps) to restore readable structure. Code fences are kept byte-for-byte verbatim — the index also eats spaces where line breaks used to be, so fenced commands can be mangled — and the response includes a warning not to execute fenced commands as-is. Inline constructs such as links, `--flags`, and version numbers are left untouched.
 
 ## Setup
 

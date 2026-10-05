@@ -10,7 +10,19 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// resultText extracts the first text block of a tool result.
+func resultText(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	tc, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("unexpected content type: %T", res.Content[0])
+	}
+	return tc.Text
+}
 
 func TestNewRedHatAPIRequiresToken(t *testing.T) {
 	t.Setenv("RH_API_OFFLINE_TOKEN", "")
@@ -250,24 +262,103 @@ func TestGetKCSExtractsFields(t *testing.T) {
 	if details.Issue != "The component fails to start." {
 		t.Errorf("issue (array form) = %q", details.Issue)
 	}
-	// Flattened resolution text must regain its block structure.
+	// Flattened resolution text must regain its block structure, with the
+	// code fence isolated verbatim on its own lines.
 	if !strings.HasPrefix(details.Resolution, "## Solution\n- OCP 4.6: Upgrade to 4.6.55 or above\n- OCP 4.7:") {
 		t.Errorf("resolution head not reflowed:\n%q", details.Resolution)
 	}
 	for _, want := range []string{
 		"\n\n## Workaround",
 		"steps.\n1. Disable",
-		"operator\n\n~~~ oc patch",
+		"~~~\noc patch clusterversion version--type json\n~~~",
 	} {
 		if !strings.Contains(details.Resolution, want) {
 			t.Errorf("resolution missing %q:\n%q", want, details.Resolution)
 		}
 	}
-	if strings.Contains(details.Resolution, "version--type") == false {
-		t.Errorf("inline double-dash must not be split: %q", details.Resolution)
+	if strings.Count(details.Resolution, "version--type") != 1 {
+		t.Errorf("fenced command must stay verbatim: %q", details.Resolution)
+	}
+	if !fencedCodePresent(details.Resolution) {
+		t.Error("fence should be detected for the warning note")
 	}
 	if details.ViewURI != "https://access.redhat.com/solutions/7010411" {
 		t.Errorf("view_uri fallback = %q", details.ViewURI)
+	}
+}
+
+func TestGetKCSArticleUsesAbstract(t *testing.T) {
+	// Articles (documentKind=Article) carry an abstract instead of
+	// solution_resolution/issue; drafts may have no body at all.
+	ts := kcsSearchHandler(t, `{"response":{"docs":[{
+		"id":"1240753",
+		"documentKind":"Article",
+		"publishedTitle":"Allocate Floating IP Addresses in OpenStack Networking",
+		"standard_product":"Red Hat OpenStack Platform",
+		"abstract":"Floating IP addresses allow you to direct ingress network traffic to your OpenStack instances.",
+		"view_uri":"https://access.redhat.com/articles/1240753"
+	}]}}`)
+	defer ts.Close()
+
+	api, _ := newTestAPI(t, ts.URL)
+	swapGlobalAPI(t, api)
+
+	toolResult, details, err := getKCS(context.Background(), nil, GetKCSParams{SolutionID: "1240753"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.Kind != "Article" || details.Abstract == "" || details.Title == "" {
+		t.Fatalf("article details incomplete: %+v", details)
+	}
+	if !strings.Contains(resultText(t, toolResult), "**Abstract:**") {
+		t.Errorf("text output missing abstract section: %s", resultText(t, toolResult))
+	}
+	if strings.Contains(resultText(t, toolResult), "No body content") {
+		t.Errorf("abstract present, empty-body note must not appear")
+	}
+}
+
+func TestGetKCSEmptyBodyNote(t *testing.T) {
+	ts := kcsSearchHandler(t, `{"response":{"docs":[{
+		"id":"9999999",
+		"documentKind":"Article",
+		"publishedTitle":"Draft with no body",
+		"abstract":"",
+		"issue":null,
+		"solution_resolution":null
+	}]}}`)
+	defer ts.Close()
+
+	api, _ := newTestAPI(t, ts.URL)
+	swapGlobalAPI(t, api)
+
+	toolResult, _, err := getKCS(context.Background(), nil, GetKCSParams{SolutionID: "9999999"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resultText(t, toolResult), "No body content is available in the search index") {
+		t.Errorf("missing empty-body note: %s", resultText(t, toolResult))
+	}
+}
+
+func TestGetKCSWarnsAboutFencedCommands(t *testing.T) {
+	ts := kcsSearchHandler(t, `{"response":{"docs":[{
+		"id":"7010411",
+		"publishedTitle":"With commands",
+		"solution_resolution":"Run this: ~~~oc get nodes-o wide~~~ then stop."
+	}]}}`)
+	defer ts.Close()
+
+	api, _ := newTestAPI(t, ts.URL)
+	swapGlobalAPI(t, api)
+
+	toolResult, _, err := getKCS(context.Background(), nil, GetKCSParams{SolutionID: "7010411"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, toolResult)
+	if !strings.Contains(text, "Treat fenced commands as reference") {
+		t.Errorf("missing mangled-command warning: %s", text)
 	}
 }
 
@@ -293,10 +384,12 @@ func TestReflowMarkdown(t *testing.T) {
 		{"already structured", "line one\nline two", "line one\nline two"},
 		{"heading break", "intro text ## Workaround do this", "intro text\n\n## Workaround do this"},
 		{"bullet break", "first item- second item- third", "first item\n- second item\n- third"},
+		{"double dash never split", "oc debug node/-- chroot /host bash-c 'x'", "oc debug node/-- chroot /host bash-c 'x'"},
 		{"ordered break", "Follow these steps.1. Disable it.2. Restart it.", "Follow these steps.\n1. Disable it.\n2. Restart it."},
 		{"version numbers untouched", "Upgrade to 4.6.55 or 4.7.42 before upgrading", "Upgrade to 4.6.55 or 4.7.42 before upgrading"},
 		{"inline dash untouched", "run version--type json-p flags", "run version--type json-p flags"},
-		{"fence break", "before ~~~ oc get pods ~~~ after", "before\n\n~~~ oc get pods\n\n~~~ after"},
+		{"fence with own lines", "before ```oc get pods``` after", "before\n\n```\noc get pods\n```\n\nafter"},
+		{"fence content verbatim", "intro ```# cmd --flag- yaml: value``` tail- bullet", "intro\n\n```\n# cmd --flag- yaml: value\n```\n\ntail\n- bullet"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -304,5 +397,17 @@ func TestReflowMarkdown(t *testing.T) {
 				t.Errorf("reflowMarkdown(%q) =\n%q\nwant:\n%q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFencedCodePresent(t *testing.T) {
+	if !fencedCodePresent("text ```cmd``` more") {
+		t.Error("should detect backtick fence")
+	}
+	if !fencedCodePresent("text ~~~cmd~~~ more") {
+		t.Error("should detect tilde fence")
+	}
+	if fencedCodePresent("plain text only") {
+		t.Error("plain text has no fence")
 	}
 }

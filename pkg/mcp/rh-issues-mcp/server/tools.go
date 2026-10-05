@@ -215,7 +215,7 @@ func getIssue(ctx context.Context, req *mcp.CallToolRequest, params GetIssuePara
 
 	if issue.Fields != nil {
 		details.Summary = issue.Fields.Summary
-		details.Description = issue.Fields.Description
+		details.Description = jiraToMarkdown(issue.Fields.Description)
 
 		if issue.Fields.Status != nil {
 			details.Status = issue.Fields.Status.Name

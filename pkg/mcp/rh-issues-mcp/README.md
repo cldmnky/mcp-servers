@@ -46,7 +46,9 @@ Returns `issues` (key, summary, status, priority, view URI), `count`, `query`, `
 
 - `issue_key` (required): e.g. `OCPBUGS-55179`.
 
-Returns key, summary, description, status, priority, created/updated dates, and a link to `https://redhat.atlassian.net/browse/{key}`.
+Returns key, summary, description (converted from Jira wiki markup to Markdown), status, priority, created/updated dates, and a link to `https://redhat.atlassian.net/browse/{key}`.
+
+**Markup conversion:** Jira stores descriptions in wiki markup (`h2.` headings, `{noformat}`/`{code}` blocks, `*bold*`, `[title|url]` links, `[~mention]`). The server converts these to Markdown; unknown constructs pass through unchanged, and fenced code is never altered. Markers are sometimes stored backslash-escaped (`\{code}`) — both forms are handled.
 
 ## API
 
